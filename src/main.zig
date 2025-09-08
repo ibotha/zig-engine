@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 const vk = @import("vulkan");
 const vert_spv align(@alignOf(u32)) = @embedFile("vertex_shader").*;
 const frag_spv align(@alignOf(u32)) = @embedFile("fragment_shader").*;
+const zlm = @import("zlm").as(f32);
 
 const MIN_IMAGE_COUNT = 2;
 
@@ -32,19 +33,19 @@ const Vertex = struct {
         .{
             .binding = 0,
             .location = 1,
-            .format = .r32g32b32_sfloat,
-            .offset = @offsetOf(Vertex, "color"),
+            .format = .r32g32_sfloat,
+            .offset = @offsetOf(Vertex, "uv"),
         },
     };
 
-    pos: [2]f32,
-    color: [3]f32,
+    pos: zlm.Vec2,
+    uv: zlm.Vec2,
 };
 
 const vertices = [_]Vertex{
-    .{ .pos = .{ 0, -0.5 }, .color = .{ 1, 0, 0 } },
-    .{ .pos = .{ 0.5, 0.5 }, .color = .{ 0, 1, 0 } },
-    .{ .pos = .{ -0.5, 0.5 }, .color = .{ 0, 0, 1 } },
+    .{ .pos = .{ .x = 0, .y = -0.5 }, .uv = .{ .x = 0.5, .y = 1 } },
+    .{ .pos = .{ .x = 0.5, .y = 0.5 }, .uv = .{ .x = 1, .y = 0 } },
+    .{ .pos = .{ .x = -0.5, .y = 0.5 }, .uv = .{ .x = 0, .y = 0 } },
 };
 fn glfw_error_callback(err: c_int, description: [*c]const u8) callconv(std.builtin.CallingConvention.c) void {
     std.debug.print("GLFW Error {d}: {s}\n", .{ err, description });
@@ -139,7 +140,7 @@ pub fn main() !void {
     defer v.dev.freeMemory(memory, null);
     try v.dev.bindBufferMemory(buffer, memory, 0);
 
-    try uploadVertices(&v, pool, buffer, &[_]f32{ 1.0, 1.0, 1.0 }, 0, 0);
+    try uploadVertices(&v, pool, buffer);
 
     var cmdbufs = try createCommandBuffers(
         &v,
@@ -248,7 +249,6 @@ pub fn main() !void {
 
         const cmd_buffer = &cmdbufs[swapchain.image_index];
         const framebuffer = &framebuffers[swapchain.image_index];
-        try uploadVertices(&v, pool, buffer, clear_color_slice, x, y);
 
         try start_frame(&v, pool, swapchain.currentSwapImage().frame_fence, cmd_buffer, extent, render_pass, pipeline, framebuffer);
         {
@@ -277,13 +277,6 @@ pub fn main() !void {
                 const is_minimized = (draw_data.*.DisplaySize.x <= 0.0 or draw_data.*.DisplaySize.y <= 0.0);
                 if (!is_minimized) {
                     c.c.cImGui_ImplVulkan_RenderDrawData(draw_data, @ptrFromInt(@intFromEnum(cmd_buffer.*)));
-                    // wd.ClearValue.color.float32[0] = clear_color.x * clear_color.w;
-                    // wd.ClearValue.color.float32[1] = clear_color.y * clear_color.w;
-                    // wd.ClearValue.color.float32[2] = clear_color.z * clear_color.w;
-                    // wd.ClearValue.color.float32[3] = clear_color.w;
-                    // FrameRender(&v, &swapchain, wd, draw_data) catch |err| {
-                    //     std.debug.print("WTF!!!!! {any}\n", .{err});
-                    // };
                 }
             }
             // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
@@ -318,7 +311,7 @@ pub fn main() !void {
     try v.dev.deviceWaitIdle();
 }
 
-fn uploadVertices(v: *const Vulkan, pool: vk.CommandPool, buffer: vk.Buffer, col: []const f32, x: f32, y: f32) !void {
+fn uploadVertices(v: *const Vulkan, pool: vk.CommandPool, buffer: vk.Buffer) !void {
     const staging_buffer = try v.dev.createBuffer(&.{
         .size = @sizeOf(@TypeOf(vertices)),
         .usage = .{ .transfer_src_bit = true },
@@ -336,13 +329,6 @@ fn uploadVertices(v: *const Vulkan, pool: vk.CommandPool, buffer: vk.Buffer, col
 
         const gpu_vertices: [*]Vertex = @ptrCast(@alignCast(data));
         @memcpy(gpu_vertices, vertices[0..]);
-        for (gpu_vertices[0..vertices.len]) |*vert| {
-            vert.color[0] = col[0];
-            vert.color[1] = col[1];
-            vert.color[2] = col[2];
-            vert.pos[0] += x;
-            vert.pos[1] += y;
-        }
     }
 
     try copyBuffer(v, pool, buffer, staging_buffer, @sizeOf(@TypeOf(vertices)));
@@ -705,188 +691,4 @@ fn createPipeline(
         @ptrCast(&pipeline),
     );
     return pipeline;
-}
-
-fn SetupVulkanWindow(
-    v: *Vulkan,
-    wd: *c.c.ImGui_ImplVulkanH_Window,
-    s: *Swapchain,
-    width: i32,
-    height: i32,
-) !void {
-    const res = try v.instance.getPhysicalDeviceSurfaceSupportKHR(v.pdev, v.graphics_queue.family, v.surface);
-    if (res != .true) return error.NoWSISupport;
-
-    const sem_count: c_int = @intCast(s.swap_images.len + 1);
-    const img_count: c_int = @intCast(s.swap_images.len);
-    wd.* = .{
-        .PresentMode = @intCast(@intFromEnum(s.present_mode)),
-        .Surface = @ptrFromInt(@intFromEnum(v.surface)),
-        .ClearEnable = true,
-        .Swapchain = @ptrFromInt(@intFromEnum(s.handle)),
-        .SurfaceFormat = @bitCast(s.surface_format),
-        .Width = width,
-        .Height = height,
-        .SemaphoreCount = @intCast(sem_count),
-        .FrameSemaphores = .{
-            .Capacity = sem_count,
-            .Data = @ptrCast(try v.allocator.alloc(c.c.ImGui_ImplVulkanH_FrameSemaphores, @intCast(sem_count))),
-            .Size = sem_count,
-        },
-        .ImageCount = @intCast(img_count),
-        .Frames = .{
-            .Capacity = img_count,
-            .Data = @ptrCast(try v.allocator.alloc(c.c.ImGui_ImplVulkanH_Frame, @intCast(img_count))),
-            .Size = img_count,
-        },
-        .FrameIndex = 0,
-        .SemaphoreIndex = 0,
-        .UseDynamicRendering = false,
-    };
-    {
-        var attachment = vk.AttachmentDescription{
-            .format = s.surface_format.format,
-            .samples = .{ .@"1_bit" = true },
-            .load_op = .dont_care,
-            .store_op = .store,
-            .stencil_load_op = .dont_care,
-            .stencil_store_op = .dont_care,
-            .initial_layout = .undefined,
-            .final_layout = .present_src_khr,
-        };
-        const color_attachment = vk.AttachmentReference{
-            .attachment = 0,
-            .layout = .color_attachment_optimal,
-        };
-        const subpass = vk.SubpassDescription{
-            .pipeline_bind_point = .graphics,
-            .color_attachment_count = 1,
-            .p_color_attachments = @ptrCast(&color_attachment),
-        };
-        const zero: u32 = 0;
-        const dependency = vk.SubpassDependency{
-            .src_subpass = ~zero,
-            .dst_subpass = 0,
-            .src_stage_mask = .{ .color_attachment_output_bit = true },
-            .dst_stage_mask = .{ .color_attachment_output_bit = true },
-            .src_access_mask = .{},
-            .dst_access_mask = .{ .color_attachment_write_bit = true },
-        };
-        const info = vk.RenderPassCreateInfo{
-            .attachment_count = 1,
-            .p_attachments = @ptrCast(&attachment),
-            .subpass_count = 1,
-            .p_subpasses = @ptrCast(&subpass),
-            .dependency_count = 1,
-            .p_dependencies = @ptrCast(&dependency),
-        };
-        wd.RenderPass = @ptrFromInt(@intFromEnum(try v.dev.createRenderPass(&info, null)));
-    }
-    for (0..wd.ImageCount) |i| {
-        const fd = &wd.Frames.Data[i];
-        const pool_info = vk.CommandPoolCreateInfo{
-            .flags = .{},
-            .queue_family_index = v.graphics_queue.family,
-        };
-        const cmd_pool = try v.dev.createCommandPool(&pool_info, null);
-        fd.CommandPool = @ptrFromInt(@intFromEnum(cmd_pool));
-        const cba_info = vk.CommandBufferAllocateInfo{
-            .command_pool = cmd_pool,
-            .level = .primary,
-            .command_buffer_count = 1,
-        };
-        try v.dev.allocateCommandBuffers(&cba_info, @ptrCast(&fd.CommandBuffer));
-        const fence_info = vk.FenceCreateInfo{
-            .flags = .{ .signaled_bit = true },
-        };
-        const fence = try v.dev.createFence(&fence_info, null);
-        fd.Fence = @ptrFromInt(@intFromEnum(fence));
-        fd.Backbuffer = @ptrFromInt(@intFromEnum(s.swap_images[i].image));
-        fd.BackbufferView = @ptrFromInt(@intFromEnum(s.swap_images[i].view));
-        const fb_info = vk.FramebufferCreateInfo{
-            .render_pass = @enumFromInt(@intFromPtr(wd.RenderPass)),
-            .height = @intCast(height),
-            .width = @intCast(width),
-            .flags = .{},
-            .attachment_count = 1,
-            .p_attachments = @ptrCast(&s.swap_images[i].view),
-            .layers = 1,
-        };
-        const framebuffer = try v.dev.createFramebuffer(&fb_info, null);
-        fd.Framebuffer = @ptrFromInt(@intFromEnum(framebuffer));
-        // = .{
-        //     .BackbufferView = @ptrFromInt(@intFromEnum(s.swap_images[i].view)),
-        //     .Framebuffer = @ptrFromInt(@intFromEnum(framebuffers[i])),
-        //     .CommandBuffer = @ptrFromInt(@intFromEnum(cmdbufs[i])),
-        //     .CommandPool = @ptrFromInt(@intFromEnum(pool)),
-        //     .Fence = @ptrFromInt(@intFromEnum(s.swap_images[i].frame_fence)),
-        // };
-    }
-    for (0..wd.SemaphoreCount) |i| {
-        wd.FrameSemaphores.Data[i].ImageAcquiredSemaphore = @ptrFromInt(@intFromEnum(try v.dev.createSemaphore(&.{}, null)));
-        wd.FrameSemaphores.Data[i].RenderCompleteSemaphore = @ptrFromInt(@intFromEnum(try v.dev.createSemaphore(&.{}, null)));
-    }
-}
-
-fn CleanupVulkanWindow(
-    v: *Vulkan,
-    wd: *c.c.ImGui_ImplVulkanH_Window,
-) void {
-    for (0..wd.ImageCount) |i| {
-        v.dev.destroyCommandPool(@enumFromInt(@intFromPtr(wd.Frames.Data[i].CommandPool)), null);
-        v.dev.destroyFence(@enumFromInt(@intFromPtr(wd.Frames.Data[i].Fence)), null);
-    }
-    for (0..wd.SemaphoreCount) |i| {
-        v.dev.destroySemaphore(@enumFromInt(@intFromPtr(wd.FrameSemaphores.Data[i].ImageAcquiredSemaphore)), null);
-        v.dev.destroySemaphore(@enumFromInt(@intFromPtr(wd.FrameSemaphores.Data[i].RenderCompleteSemaphore)), null);
-    }
-    v.dev.destroyRenderPass(@enumFromInt(@intFromPtr(wd.RenderPass)), null);
-    v.allocator.free(wd.Frames.Data[0..wd.ImageCount]);
-    v.allocator.free(wd.FrameSemaphores.Data[0..wd.SemaphoreCount]);
-}
-
-fn FrameRender(
-    v: *Vulkan,
-    s: *Swapchain,
-    wd: *c.c.ImGui_ImplVulkanH_Window,
-    draw_data: *c.c.ImDrawData,
-) !void {
-    const fd = &wd.Frames.Data[s.image_index];
-
-    _ = try v.dev.waitForFences(1, @ptrCast(&fd.Fence), .true, std.math.maxInt(u64));
-    {
-        try v.dev.resetFences(1, @ptrCast(&fd.Fence));
-        try v.dev.resetCommandPool(@enumFromInt(@intFromPtr(fd.CommandPool)), .{});
-        var info = vk.CommandBufferBeginInfo{
-            .flags = .{ .one_time_submit_bit = true },
-        };
-        try v.dev.beginCommandBuffer(@enumFromInt(@intFromPtr(fd.CommandBuffer)), &info);
-    }
-    {
-        var info = vk.RenderPassBeginInfo{
-            .render_pass = @enumFromInt(@intFromPtr(wd.RenderPass)),
-            .framebuffer = @enumFromInt(@intFromPtr(fd.Framebuffer)),
-            .render_area = .{
-                .extent = .{
-                    .width = @intCast(wd.Width),
-                    .height = @intCast(wd.Height),
-                },
-                .offset = .{
-                    .x = 0,
-                    .y = 0,
-                },
-            },
-            .clear_value_count = 1,
-            .p_clear_values = @ptrCast(&wd.ClearValue),
-        };
-        v.dev.cmdBeginRenderPass(@enumFromInt(@intFromPtr(fd.CommandBuffer)), &info, .@"inline");
-    }
-
-    // Record dear imgui primitives into command buffer
-    c.c.cImGui_ImplVulkan_RenderDrawData(draw_data, fd.CommandBuffer);
-
-    // Submit command buffer
-    v.dev.cmdEndRenderPass(@enumFromInt(@intFromPtr(fd.CommandBuffer)));
-
-    try v.dev.endCommandBuffer(@enumFromInt(@intFromPtr(fd.CommandBuffer)));
 }

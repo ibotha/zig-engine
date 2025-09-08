@@ -33,7 +33,7 @@
     // internet connectivity.
     .dependencies = .{
         .vulkan_zig = .{
-            .url = "https://github.com/Snektron/vulkan-zig/archive/refs/heads/master.zip",
+            .url = "https://github.com/Snektron/vulkan-zig/archive/refs/heads/zig-0.15-compat.zip",
             .hash = "vulkan-0.0.0-r7Ytx6hBAwBUnt0XA-uOkR2hda4fAHFhQITNTgJpnFkY",
         },
         .vulkan_headers = .{
@@ -51,6 +51,10 @@
         .glfw_zig = .{
             .url = "git+https://github.com/tiawl/glfw.zig?ref=X11.zig-libXfixes-6.0.2#1e6ea9b8d0b9cfadb76f9d0cab88310101161f20",
             .hash = "glfw_zig-1.0.0-NrvYoy7XGQC81KLHUCl9TBUJg8BENZ_3Wtzo2Ap_zyvM",
+        },
+        .vulkan = .{
+            .url = "git+https://github.com/Snektron/vulkan-zig.git#4b7b9a8b949f326d85d9eff5013f445fb95ffbab",
+            .hash = "vulkan-0.0.0-r7Ytx5BBAwCay_2JFZPIdfMhfu28r5znPs1-DXRmuMIk",
         },
     },
     .paths = .{
