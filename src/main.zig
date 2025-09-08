@@ -180,8 +180,60 @@ pub fn main() !void {
     vk_allocator.report();
     vk_allocator.reset_counts();
 
+    // =============== ImGui ====================
+
+    if (!c.c.cImGui_ImplVulkan_LoadFunctions(@as(u32, @bitCast(vk.API_VERSION_1_2)), loader)) return error.ImGuiVulkanLoadFailure;
+
+    // Setup Dear ImGui context
+    if (c.c.ImGui_CreateContext(null) == null) return error.ImGuiCreateContextFailure;
+    defer c.c.ImGui_DestroyContext(null);
+    const io = c.c.ImGui_GetIO(); // (void)io;
+    io.*.ConfigFlags |= c.c.ImGuiConfigFlags_NavEnableKeyboard; // Enable Keyboard Controls
+    io.*.ConfigFlags |= c.c.ImGuiConfigFlags_NavEnableGamepad; // Enable Gamepad Controls
+    io.*.ConfigFlags |= c.c.ImGuiConfigFlags_DockingEnable;
+
+    // Setup Dear ImGui style
+    c.c.ImGui_StyleColorsDark(null);
+    const pool_sizes = [_]vk.DescriptorPoolSize{
+        .{
+            .type = .combined_image_sampler,
+            .descriptor_count = 1,
+        },
+    };
+    var pool_info = vk.DescriptorPoolCreateInfo{
+        .flags = .{ .free_descriptor_set_bit = true },
+        .max_sets = 1,
+        .pool_size_count = pool_sizes.len,
+        .p_pool_sizes = @ptrCast(&pool_sizes),
+    };
+    const descriptorPool = try dev.createDescriptorPool(&pool_info, &vk_allocator.callbacks);
+    defer dev.destroyDescriptorPool(descriptorPool, &vk_allocator.callbacks);
+
+    // Setup Platform/Renderer backends
+    if (!c.c.cImGui_ImplGlfw_InitForVulkan(window, true)) return error.ImGuiGlfwInitForVulkanFailure;
+    defer c.c.cImGui_ImplGlfw_Shutdown();
+    var init_info = c.c.ImGui_ImplVulkan_InitInfo{};
+    init_info.Instance = @ptrFromInt(@intFromEnum(instance.handle));
+    init_info.PhysicalDevice = @ptrFromInt(@intFromEnum(pdev));
+    init_info.Device = @ptrFromInt(@intFromEnum(dev.handle));
+    init_info.Queue = @ptrFromInt(@intFromEnum(graphics_queue.handle));
+    init_info.RenderPass = null;
+    init_info.DescriptorPool = @ptrFromInt(@intFromEnum(descriptorPool));
+    init_info.MinImageCount = 4;
+    init_info.ImageCount = @truncate(swap_images.len);
+    init_info.MSAASamples = c.c.VK_SAMPLE_COUNT_1_BIT;
+    init_info.CheckVkResultFn = check_vk_result;
+    init_info.UseDynamicRendering = true;
+    init_info.Allocator = @ptrCast(&vk_allocator.callbacks);
+    init_info.PipelineRenderingCreateInfo = .{
+        .sType = c.c.VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = @ptrCast(&format.format),
+    };
+    if (!c.c.cImGui_ImplVulkan_Init(&init_info)) return error.ImGuiVulkanInitFailure;
+    defer c.c.cImGui_ImplVulkan_Shutdown();
+
     // =============== Runloop ==================
-    var frame_no: usize = 0;
     var refresh_swapchain: bool = false;
     while (c.glfwWindowShouldClose(window) == 0) {
         var w: c_int = undefined;
@@ -215,6 +267,47 @@ pub fn main() !void {
             1,
             @ptrCast(&subresourceRange(.{ .color_bit = true })),
         );
+        {
+            // const offset = [_]vk.DeviceSize{0};
+
+            c.c.cImGui_ImplVulkan_NewFrame();
+            c.c.cImGui_ImplGlfw_NewFrame();
+            c.c.ImGui_NewFrame();
+            const winclass = c.c.ImGuiWindowClass{
+                .ClassId = 0,
+                .ViewportFlagsOverrideClear = 1,
+                .DockingAllowUnclassed = true,
+            };
+
+            c.c.ImGui_PushStyleColorImVec4(c.c.ImGuiCol_DockingEmptyBg, c.c.ImVec4{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 0.0 });
+            c.c.ImGui_PushStyleColorImVec4(c.c.ImGuiCol_WindowBg, c.c.ImVec4{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 0.0 });
+            _ = c.c.ImGui_DockSpaceOverViewportEx(0, null, 0, &winclass);
+            c.c.ImGui_PopStyleColor();
+            c.c.ImGui_PopStyleColor();
+
+            defer {
+                c.c.ImGui_EndFrame();
+                c.c.ImGui_Render();
+                const draw_data = c.c.ImGui_GetDrawData();
+                const is_minimized = (draw_data.*.DisplaySize.x <= 0.0 or draw_data.*.DisplaySize.y <= 0.0);
+                if (!is_minimized) {
+                    c.c.cImGui_ImplVulkan_RenderDrawData(draw_data, @ptrFromInt(@intFromEnum(im.cmdbuf)));
+                }
+            }
+
+            {
+                _ = c.c.ImGui_Begin("Hello, world!", null, 0);
+                defer c.c.ImGui_End();
+
+                c.c.ImGui_Text("Position");
+
+                c.c.ImGui_Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0 / io.*.Framerate, io.*.Framerate);
+                c.c.ImGui_Text("Allocations %d", vk_allocator.alloc_count);
+                c.c.ImGui_Text("Re-Allocations %d", vk_allocator.realloc_count);
+                c.c.ImGui_Text("Frees %d", vk_allocator.free_count);
+                vk_allocator.reset_counts();
+            }
+        }
         try transitionImage(&dev, im.cmdbuf, im.image, .general, .present_src_khr);
 
         try dev.endCommandBuffer(im.cmdbuf);
@@ -282,12 +375,6 @@ pub fn main() !void {
             refresh_swapchain = true;
         }
 
-        if ((frame_no % 4000) == 0) {
-            std.debug.print("\n== Frame: {d} ==\n", .{frame_no});
-            vk_allocator.report();
-            vk_allocator.reset_counts();
-        }
-        frame_no += 1;
         c.glfwPollEvents();
     }
 
@@ -302,6 +389,16 @@ pub fn main() !void {
 }
 
 // ================== Callbacks for GLFW ====================
+
+fn check_vk_result(err: c.c.VkResult) callconv(std.builtin.CallingConvention.c) void {
+    if (err == 0) return;
+    std.debug.print("[vulkan] Error: VkResult = {d}\n", .{err});
+    if (err < 0) std.process.exit(1);
+}
+
+fn loader(name: [*c]const u8, instance: ?*anyopaque) callconv(std.builtin.CallingConvention.c) ?*const fn () callconv(std.builtin.CallingConvention.c) void {
+    return c.glfwGetInstanceProcAddress(@enumFromInt(@intFromPtr(instance)), name);
+}
 
 fn glfw_error_callback(err: c_int, description: [*c]const u8) callconv(std.builtin.CallingConvention.c) void {
     std.debug.print("GLFW Error {d}: {s}\n", .{ err, description });
@@ -329,6 +426,7 @@ const VkAllocator = struct {
     callbacks: vk.AllocationCallbacks,
     alloc_count: usize,
     realloc_count: usize,
+    free_count: usize,
 
     pub fn init(allocator: Allocator) !*VkAllocator {
         var self: *VkAllocator = try allocator.create(VkAllocator);
@@ -342,10 +440,13 @@ const VkAllocator = struct {
         };
         self.alloc_count = 0;
         self.realloc_count = 0;
+        self.free_count = 0;
         return self;
     }
 
     pub fn deinit(self: *VkAllocator) void {
+        std.debug.print("Deinit\n", .{});
+        self.report();
         self.allocations.clearAndFree();
         self.allocator.destroy(self);
     }
@@ -383,6 +484,7 @@ const VkAllocator = struct {
         free(p_user_data, ptr);
         self.realloc_count += 1;
         self.alloc_count -= 1;
+        self.free_count -= 1;
         return @ptrCast(ret);
     }
 
@@ -395,11 +497,13 @@ const VkAllocator = struct {
         const cast_ptr: [*c]u8 = @ptrCast(ptr);
         self.allocator.rawFree(cast_ptr[0..allocation.size], allocation.alignment, @returnAddress());
         _ = self.allocations.remove(ptr);
+        self.free_count += 1;
     }
 
     pub fn reset_counts(self: *VkAllocator) void {
         self.alloc_count = 0;
         self.realloc_count = 0;
+        self.free_count = 0;
     }
 
     pub fn report(self: *const VkAllocator) void {
@@ -413,6 +517,7 @@ const VkAllocator = struct {
         }
         std.debug.print("{} allocations.\n", .{self.alloc_count});
         std.debug.print("{} reallocations.\n", .{self.realloc_count});
+        std.debug.print("{} frees.\n", .{self.free_count});
         std.debug.print("Total memory usage: {} bytes over {} allocations\n", .{ total_mem, total_allocs });
     }
 };
