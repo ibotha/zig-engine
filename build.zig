@@ -39,15 +39,6 @@ pub fn build(b: *std.Build) !void {
         }),
     });
 
-    exe.addCSourceFiles(.{
-        .files = &.{"external/vk_mem_alloc/src.cpp"},
-        .flags = &.{
-            "-std=c++17",
-        },
-    });
-
-    exe.addIncludePath(b.path("external/include"));
-
     cimgui_dep = b.dependency("cimgui_zig", .{
         .target = target,
         .optimize = optimize,
