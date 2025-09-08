@@ -195,12 +195,101 @@ pub fn main() !void {
     };
     defer dev.destroySwapchainKHR(swapchain, &vk_allocator.callbacks);
 
-    const swap_images = try initSwapchainImages(&dev, swapchain, format.format, allocator, &vk_allocator.callbacks);
+    const swap_images = try initSwapchainImages(&dev, swapchain, format.format, graphics_queue, allocator, &vk_allocator.callbacks);
     defer allocator.free(swap_images);
     defer for (swap_images) |si| si.deinit(&dev, &vk_allocator.callbacks);
+
+    var next_image_acquired = try dev.createSemaphore(&.{}, &vk_allocator.callbacks);
+    defer dev.destroySemaphore(next_image_acquired, &vk_allocator.callbacks);
+
+    var frame_index = blk: {
+        const result = try dev.acquireNextImageKHR(swapchain, std.math.maxInt(u64), next_image_acquired, .null_handle);
+
+        if (result.result == .not_ready or result.result == .timeout) {
+            return error.ImageAcquireFailed;
+        }
+        break :blk result.image_index;
+    };
+
+    std.mem.swap(vk.Semaphore, &swap_images[frame_index].image_acquired, &next_image_acquired);
+
     std.debug.print("\n== Swapchain created ==\n", .{});
     vk_allocator.report();
     vk_allocator.reset_counts();
+
+    // =============== Runloop ==================
+    while (c.glfwWindowShouldClose(window) == 0) {
+        const im = &swap_images[frame_index];
+
+        try im.waitForFence(&dev);
+        try dev.resetFences(1, @ptrCast(&im.frame_fence));
+        try dev.resetCommandBuffer(im.cmdbuf, .{});
+
+        try dev.beginCommandBuffer(im.cmdbuf, &vk.CommandBufferBeginInfo{
+            .flags = .{ .one_time_submit_bit = true },
+        });
+
+        try transitionImage(&dev, im.cmdbuf, im.image, .undefined, .general);
+        dev.cmdClearColorImage(
+            im.cmdbuf,
+            im.image,
+            .general,
+            &vk.ClearColorValue{ .float_32 = .{ 1.0, 0.8, 0.2, 1.0 } },
+            1,
+            @ptrCast(&subresourceRange(.{ .color_bit = true })),
+        );
+        try transitionImage(&dev, im.cmdbuf, im.image, .general, .present_src_khr);
+
+        try dev.endCommandBuffer(im.cmdbuf);
+
+        const wait_stage = [_]vk.PipelineStageFlags{.{ .top_of_pipe_bit = true }};
+        const wait_semaphores = [_]vk.Semaphore{
+            im.image_acquired,
+        };
+        const complete_semaphores = [_]vk.Semaphore{
+            im.render_finished,
+        };
+        const buffers = [_]vk.CommandBuffer{
+            im.cmdbuf,
+        };
+        try dev.queueSubmit(graphics_queue.handle, 1, &[_]vk.SubmitInfo{
+            .{
+                .wait_semaphore_count = wait_semaphores.len,
+                .p_wait_semaphores = @ptrCast(&wait_semaphores),
+                .p_wait_dst_stage_mask = &wait_stage,
+                .command_buffer_count = buffers.len,
+                .p_command_buffers = @ptrCast(&buffers),
+                .signal_semaphore_count = complete_semaphores.len,
+                .p_signal_semaphores = @ptrCast(&complete_semaphores),
+            },
+        }, im.frame_fence);
+
+        const semaphores = [_]vk.Semaphore{
+            im.render_finished,
+        };
+
+        _ = try dev.queuePresentKHR(present_queue.handle, &.{
+            .wait_semaphore_count = semaphores.len,
+            .p_wait_semaphores = @ptrCast(&semaphores),
+            .swapchain_count = 1,
+            .p_swapchains = @ptrCast(&swapchain),
+            .p_image_indices = @ptrCast(&frame_index),
+        });
+
+        const result = try dev.acquireNextImageKHR(
+            swapchain,
+            std.math.maxInt(u64),
+            next_image_acquired,
+            .null_handle,
+        );
+
+        std.mem.swap(vk.Semaphore, &swap_images[result.image_index].image_acquired, &next_image_acquired);
+        frame_index = result.image_index;
+        c.glfwPollEvents();
+    }
+
+    for (swap_images) |si| si.waitForFence(&dev) catch {};
+    try dev.deviceWaitIdle();
 }
 
 // ================== Callbacks for GLFW ====================
@@ -502,8 +591,10 @@ const SwapImage = struct {
     image_acquired: vk.Semaphore,
     render_finished: vk.Semaphore,
     frame_fence: vk.Fence,
+    pool: vk.CommandPool,
+    cmdbuf: vk.CommandBuffer,
 
-    fn init(dev: *const vk.DeviceProxy, image: vk.Image, format: vk.Format, callbacks: *vk.AllocationCallbacks) !SwapImage {
+    fn init(dev: *const vk.DeviceProxy, image: vk.Image, format: vk.Format, queue: Queue, callbacks: *vk.AllocationCallbacks) !SwapImage {
         const view = try dev.createImageView(&.{
             .image = image,
             .view_type = .@"2d",
@@ -528,17 +619,34 @@ const SwapImage = struct {
         const frame_fence = try dev.createFence(&.{ .flags = .{ .signaled_bit = true } }, callbacks);
         errdefer dev.destroyFence(frame_fence, callbacks);
 
+        const pool_info = vk.CommandPoolCreateInfo{
+            .queue_family_index = queue.family,
+            .flags = .{ .reset_command_buffer_bit = true },
+        };
+        const pool = try dev.createCommandPool(&pool_info, callbacks);
+
+        var cmdbufs: [1]vk.CommandBuffer = undefined;
+        const cbuf_info = vk.CommandBufferAllocateInfo{
+            .command_buffer_count = 1,
+            .command_pool = pool,
+            .level = .primary,
+        };
+        try dev.allocateCommandBuffers(&cbuf_info, &cmdbufs);
+
         return SwapImage{
             .image = image,
             .view = view,
             .image_acquired = image_acquired,
             .render_finished = render_finished,
             .frame_fence = frame_fence,
+            .pool = pool,
+            .cmdbuf = cmdbufs[0],
         };
     }
 
     fn deinit(self: SwapImage, dev: *const vk.DeviceProxy, callbacks: *vk.AllocationCallbacks) void {
         self.waitForFence(dev) catch return;
+        dev.destroyCommandPool(self.pool, callbacks);
         dev.destroyImageView(self.view, callbacks);
         dev.destroySemaphore(self.image_acquired, callbacks);
         dev.destroySemaphore(self.render_finished, callbacks);
@@ -550,7 +658,7 @@ const SwapImage = struct {
     }
 };
 
-fn initSwapchainImages(dev: *const vk.DeviceProxy, swapchain: vk.SwapchainKHR, format: vk.Format, allocator: Allocator, callbacks: *vk.AllocationCallbacks) ![]SwapImage {
+fn initSwapchainImages(dev: *const vk.DeviceProxy, swapchain: vk.SwapchainKHR, format: vk.Format, queue: Queue, allocator: Allocator, callbacks: *vk.AllocationCallbacks) ![]SwapImage {
     const images = try dev.getSwapchainImagesAllocKHR(swapchain, allocator);
     defer allocator.free(images);
 
@@ -561,7 +669,7 @@ fn initSwapchainImages(dev: *const vk.DeviceProxy, swapchain: vk.SwapchainKHR, f
     errdefer for (swap_images[0..i]) |si| si.deinit(dev, callbacks);
 
     for (images) |image| {
-        swap_images[i] = try SwapImage.init(dev, image, format, callbacks);
+        swap_images[i] = try SwapImage.init(dev, image, format, queue, callbacks);
         i += 1;
     }
 
@@ -602,4 +710,38 @@ fn findPresentMode(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice, surface:
     }
 
     return .fifo_khr;
+}
+
+// ==================== Dynamic Rendering =================
+
+fn transitionImage(dev: *const vk.DeviceProxy, cmd: vk.CommandBuffer, image: vk.Image, current_layout: vk.ImageLayout, new_layout: vk.ImageLayout) !void {
+    const image_memory_barriers = [_]vk.ImageMemoryBarrier2{
+        .{
+            .image = image,
+            .src_stage_mask = .{ .all_commands_bit = true },
+            .src_access_mask = .{ .memory_write_bit = true },
+            .dst_stage_mask = .{ .all_commands_bit = true },
+            .dst_access_mask = .{ .memory_write_bit = true, .memory_read_bit = true },
+            .old_layout = current_layout,
+            .new_layout = new_layout,
+            .subresource_range = subresourceRange(if (new_layout == .depth_attachment_optimal) .{ .depth_bit = true } else .{ .color_bit = true }),
+            .src_queue_family_index = 0,
+            .dst_queue_family_index = 0,
+        },
+    };
+
+    dev.cmdPipelineBarrier2(cmd, &vk.DependencyInfo{
+        .image_memory_barrier_count = image_memory_barriers.len,
+        .p_image_memory_barriers = @ptrCast(&image_memory_barriers),
+    });
+}
+
+fn subresourceRange(mask: vk.ImageAspectFlags) vk.ImageSubresourceRange {
+    return .{
+        .aspect_mask = mask,
+        .base_mip_level = 0,
+        .base_array_layer = 0,
+        .layer_count = vk.REMAINING_ARRAY_LAYERS,
+        .level_count = vk.REMAINING_MIP_LEVELS,
+    };
 }
