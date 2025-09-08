@@ -26,9 +26,9 @@ pub fn main() !void {
 
     if (c.glfwVulkanSupported() == 0) return error.VulkanNotSupported;
 
-    const extent = vk.Extent2D{ .width = 800, .height = 600 };
+    var extent = vk.Extent2D{ .width = 800, .height = 600 };
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
-    c.glfwWindowHint(c.c.GLFW_RESIZABLE, c.GLFW_FALSE);
+    c.glfwWindowHint(c.c.GLFW_RESIZABLE, c.GLFW_TRUE);
     const window = c.glfwCreateWindow(
         @intCast(extent.width),
         @intCast(extent.height),
@@ -143,61 +143,24 @@ pub fn main() !void {
     vk_allocator.report();
     vk_allocator.reset_counts();
 
+    var deletor = DeletionQueue.init(allocator);
+    defer deletor.deinit();
+    defer deletor.flush(&dev, &vk_allocator.callbacks);
+
     const graphics_queue = Queue.init(dev, current_candidate.?.queues.graphics_family);
     const present_queue = Queue.init(dev, current_candidate.?.queues.present_family);
 
-    const mem_props = instance.getPhysicalDeviceMemoryProperties(pdev);
-
-    std.debug.print("\n{any}\n", .{mem_props});
+    // const mem_props = instance.getPhysicalDeviceMemoryProperties(pdev);
 
     // ================== SwapChain ===================
 
     const format = try findSurfaceFormat(instance, pdev, surface, allocator);
-    const swapchain = blk: {
-        const caps = try instance.getPhysicalDeviceSurfaceCapabilitiesKHR(pdev, surface);
-        const actual_extent = findActualExtent(caps, extent);
-
-        if (actual_extent.width == 0 or actual_extent.height == 0) {
-            return error.InvalidSurfaceDimensions;
-        }
-
-        const qfi = [_]u32{ graphics_queue.family, present_queue.family };
-        const sharing_mode: vk.SharingMode = if (graphics_queue.family != present_queue.family)
-            .concurrent
-        else
-            .exclusive;
-
-        var image_count = caps.min_image_count + 1;
-
-        if (caps.max_image_count > 0) {
-            image_count = @min(image_count, caps.max_image_count);
-        }
-
-        const info = vk.SwapchainCreateInfoKHR{
-            .image_format = format.format,
-            .image_color_space = .srgb_nonlinear_khr,
-            .present_mode = try findPresentMode(instance, pdev, surface, allocator),
-            .image_extent = actual_extent,
-            .image_usage = .{ .transfer_dst_bit = true, .color_attachment_bit = true },
-            .min_image_count = image_count,
-            .surface = surface,
-            .image_array_layers = 1,
-            .image_sharing_mode = sharing_mode,
-            .clipped = .true,
-            .old_swapchain = .null_handle,
-            .composite_alpha = .{ .opaque_bit_khr = true },
-            .pre_transform = caps.current_transform,
-            .p_queue_family_indices = &qfi,
-            .queue_family_index_count = qfi.len,
-        };
-        const handle = try dev.createSwapchainKHR(&info, &vk_allocator.callbacks);
-        break :blk handle;
-    };
+    var swapchain = try createSwapchain(&instance, &dev, pdev, surface, extent, graphics_queue, present_queue, format, allocator, &vk_allocator.callbacks, .null_handle);
     defer dev.destroySwapchainKHR(swapchain, &vk_allocator.callbacks);
 
-    const swap_images = try initSwapchainImages(&dev, swapchain, format.format, graphics_queue, allocator, &vk_allocator.callbacks);
+    var swap_images = try initSwapchainImages(&dev, swapchain, format.format, graphics_queue, allocator, &vk_allocator.callbacks);
     defer allocator.free(swap_images);
-    defer for (swap_images) |si| si.deinit(&dev, &vk_allocator.callbacks);
+    defer for (swap_images) |*si| si.deinit(&dev, &vk_allocator.callbacks);
 
     var next_image_acquired = try dev.createSemaphore(&.{}, &vk_allocator.callbacks);
     defer dev.destroySemaphore(next_image_acquired, &vk_allocator.callbacks);
@@ -218,11 +181,25 @@ pub fn main() !void {
     vk_allocator.reset_counts();
 
     // =============== Runloop ==================
+    var frame_no: usize = 0;
+    var refresh_swapchain: bool = false;
     while (c.glfwWindowShouldClose(window) == 0) {
+        var w: c_int = undefined;
+        var h: c_int = undefined;
+        c.glfwGetFramebufferSize(window, &w, &h);
+
+        if (extent.width != @as(u32, @intCast(w)) or extent.height != @as(u32, @intCast(h))) {
+            refresh_swapchain = true;
+            extent.width = @intCast(w);
+            extent.height = @intCast(h);
+        }
+
         const im = &swap_images[frame_index];
 
         try im.waitForFence(&dev);
         try dev.resetFences(1, @ptrCast(&im.frame_fence));
+        im.deletor.flush(&dev, &vk_allocator.callbacks);
+
         try dev.resetCommandBuffer(im.cmdbuf, .{});
 
         try dev.beginCommandBuffer(im.cmdbuf, &vk.CommandBufferBeginInfo{
@@ -276,6 +253,21 @@ pub fn main() !void {
             .p_image_indices = @ptrCast(&frame_index),
         });
 
+        if (refresh_swapchain) {
+            refresh_swapchain = false;
+            for (swap_images) |*si| {
+                si.waitForFence(&dev) catch {};
+            }
+            try dev.deviceWaitIdle();
+            dev.destroySwapchainKHR(swapchain, &vk_allocator.callbacks);
+            swapchain = try createSwapchain(&instance, &dev, pdev, surface, extent, graphics_queue, present_queue, format, allocator, &vk_allocator.callbacks, .null_handle);
+
+            const images = try dev.getSwapchainImagesAllocKHR(swapchain, allocator);
+            defer allocator.free(images);
+            for (swap_images, images) |*si, *i| {
+                si.change_image(&dev, i.*, format.format, &vk_allocator.callbacks) catch {};
+            }
+        }
         const result = try dev.acquireNextImageKHR(
             swapchain,
             std.math.maxInt(u64),
@@ -285,11 +277,28 @@ pub fn main() !void {
 
         std.mem.swap(vk.Semaphore, &swap_images[result.image_index].image_acquired, &next_image_acquired);
         frame_index = result.image_index;
+
+        if (result.result == .suboptimal_khr) {
+            refresh_swapchain = true;
+        }
+
+        if ((frame_no % 4000) == 0) {
+            std.debug.print("\n== Frame: {d} ==\n", .{frame_no});
+            vk_allocator.report();
+            vk_allocator.reset_counts();
+        }
+        frame_no += 1;
         c.glfwPollEvents();
     }
 
-    for (swap_images) |si| si.waitForFence(&dev) catch {};
+    for (swap_images) |*si| {
+        si.waitForFence(&dev) catch {};
+    }
     try dev.deviceWaitIdle();
+
+    std.debug.print("\n== Closed ==\n", .{});
+    vk_allocator.report();
+    vk_allocator.reset_counts();
 }
 
 // ================== Callbacks for GLFW ====================
@@ -541,6 +550,7 @@ fn allocateQueues(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice, allocator
 
     return null;
 }
+
 fn checkSurfaceSupport(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice, surface: vk.SurfaceKHR) !bool {
     var format_count: u32 = undefined;
     _ = try instance.getPhysicalDeviceSurfaceFormatsKHR(pdev, surface, &format_count, null);
@@ -574,6 +584,59 @@ fn checkExtensionSupport(
 
 // =============== SwapChain ============
 
+fn createSwapchain(
+    instance: *const vk.InstanceProxy,
+    dev: *const vk.DeviceProxy,
+    pdev: vk.PhysicalDevice,
+    surface: vk.SurfaceKHR,
+    extent: vk.Extent2D,
+    graphics_queue: Queue,
+    present_queue: Queue,
+    format: vk.SurfaceFormatKHR,
+    allocator: Allocator,
+    callbacks: *vk.AllocationCallbacks,
+    old: vk.SwapchainKHR,
+) !vk.SwapchainKHR {
+    const caps = try instance.getPhysicalDeviceSurfaceCapabilitiesKHR(pdev, surface);
+    const actual_extent = findActualExtent(caps, extent);
+
+    if (actual_extent.width == 0 or actual_extent.height == 0) {
+        return error.InvalidSurfaceDimensions;
+    }
+
+    const qfi = [_]u32{ graphics_queue.family, present_queue.family };
+    const sharing_mode: vk.SharingMode = if (graphics_queue.family != present_queue.family)
+        .concurrent
+    else
+        .exclusive;
+
+    var image_count = caps.min_image_count + 1;
+
+    if (caps.max_image_count > 0) {
+        image_count = @min(image_count, caps.max_image_count);
+    }
+
+    const info = vk.SwapchainCreateInfoKHR{
+        .image_format = format.format,
+        .image_color_space = .srgb_nonlinear_khr,
+        .present_mode = try findPresentMode(instance.*, pdev, surface, allocator),
+        .image_extent = actual_extent,
+        .image_usage = .{ .transfer_dst_bit = true, .color_attachment_bit = true },
+        .min_image_count = image_count,
+        .surface = surface,
+        .image_array_layers = 1,
+        .image_sharing_mode = sharing_mode,
+        .clipped = .true,
+        .old_swapchain = old,
+        .composite_alpha = .{ .opaque_bit_khr = true },
+        .pre_transform = caps.current_transform,
+        .p_queue_family_indices = &qfi,
+        .queue_family_index_count = qfi.len,
+    };
+    const handle = try dev.createSwapchainKHR(&info, callbacks);
+    return handle;
+}
+
 fn findActualExtent(caps: vk.SurfaceCapabilitiesKHR, extent: vk.Extent2D) vk.Extent2D {
     if (caps.current_extent.width != 0xFFFF_FFFF) {
         return caps.current_extent;
@@ -593,8 +656,49 @@ const SwapImage = struct {
     frame_fence: vk.Fence,
     pool: vk.CommandPool,
     cmdbuf: vk.CommandBuffer,
+    deletor: DeletionQueue,
 
-    fn init(dev: *const vk.DeviceProxy, image: vk.Image, format: vk.Format, queue: Queue, callbacks: *vk.AllocationCallbacks) !SwapImage {
+    fn init(dev: *const vk.DeviceProxy, image: vk.Image, format: vk.Format, queue: Queue, allocator: Allocator, callbacks: *vk.AllocationCallbacks) !SwapImage {
+        const pool_info = vk.CommandPoolCreateInfo{
+            .queue_family_index = queue.family,
+            .flags = .{ .reset_command_buffer_bit = true },
+        };
+        const pool = try dev.createCommandPool(&pool_info, callbacks);
+
+        var cmdbufs: [1]vk.CommandBuffer = undefined;
+        const cbuf_info = vk.CommandBufferAllocateInfo{
+            .command_buffer_count = 1,
+            .command_pool = pool,
+            .level = .primary,
+        };
+        try dev.allocateCommandBuffers(&cbuf_info, &cmdbufs);
+
+        var ret: SwapImage = undefined;
+
+        const image_acquired = try dev.createSemaphore(&.{}, callbacks);
+        errdefer dev.destroySemaphore(image_acquired, callbacks);
+
+        const render_finished = try dev.createSemaphore(&.{}, callbacks);
+        errdefer dev.destroySemaphore(render_finished, callbacks);
+
+        const frame_fence = try dev.createFence(&.{ .flags = .{ .signaled_bit = true } }, callbacks);
+        errdefer dev.destroyFence(frame_fence, callbacks);
+        ret.image_acquired = image_acquired;
+        ret.render_finished = render_finished;
+        ret.frame_fence = frame_fence;
+        ret.pool = pool;
+        ret.cmdbuf = cmdbufs[0];
+        ret.deletor = .init(allocator);
+        ret.view = .null_handle;
+        try ret.change_image(dev, image, format, callbacks);
+        return ret;
+    }
+
+    /// Regenerate frame data for a new image
+    pub fn change_image(self: *SwapImage, dev: *const vk.DeviceProxy, image: vk.Image, format: vk.Format, callbacks: *vk.AllocationCallbacks) !void {
+        if (self.view != .null_handle) {
+            try self.deletor.queue(self.view);
+        }
         const view = try dev.createImageView(&.{
             .image = image,
             .view_type = .@"2d",
@@ -610,50 +714,26 @@ const SwapImage = struct {
         }, callbacks);
         errdefer dev.destroyImageView(view, callbacks);
 
-        const image_acquired = try dev.createSemaphore(&.{}, callbacks);
-        errdefer dev.destroySemaphore(image_acquired, callbacks);
-
-        const render_finished = try dev.createSemaphore(&.{}, callbacks);
-        errdefer dev.destroySemaphore(render_finished, callbacks);
-
-        const frame_fence = try dev.createFence(&.{ .flags = .{ .signaled_bit = true } }, callbacks);
-        errdefer dev.destroyFence(frame_fence, callbacks);
-
-        const pool_info = vk.CommandPoolCreateInfo{
-            .queue_family_index = queue.family,
-            .flags = .{ .reset_command_buffer_bit = true },
-        };
-        const pool = try dev.createCommandPool(&pool_info, callbacks);
-
-        var cmdbufs: [1]vk.CommandBuffer = undefined;
-        const cbuf_info = vk.CommandBufferAllocateInfo{
-            .command_buffer_count = 1,
-            .command_pool = pool,
-            .level = .primary,
-        };
-        try dev.allocateCommandBuffers(&cbuf_info, &cmdbufs);
-
-        return SwapImage{
-            .image = image,
-            .view = view,
-            .image_acquired = image_acquired,
-            .render_finished = render_finished,
-            .frame_fence = frame_fence,
-            .pool = pool,
-            .cmdbuf = cmdbufs[0],
-        };
+        self.image = image;
+        self.view = view;
     }
 
-    fn deinit(self: SwapImage, dev: *const vk.DeviceProxy, callbacks: *vk.AllocationCallbacks) void {
+    fn queue_frame_delete(self: *SwapImage) !void {
+        try self.deletor.queue(self.view);
+    }
+
+    fn deinit(self: *SwapImage, dev: *const vk.DeviceProxy, callbacks: *vk.AllocationCallbacks) void {
         self.waitForFence(dev) catch return;
-        dev.destroyCommandPool(self.pool, callbacks);
-        dev.destroyImageView(self.view, callbacks);
+        _ = self.queue_frame_delete() catch unreachable;
+        self.deletor.flush(dev, callbacks);
+        self.deletor.deinit();
+        dev.destroyFence(self.frame_fence, callbacks);
         dev.destroySemaphore(self.image_acquired, callbacks);
         dev.destroySemaphore(self.render_finished, callbacks);
-        dev.destroyFence(self.frame_fence, callbacks);
+        dev.destroyCommandPool(self.pool, callbacks);
     }
 
-    fn waitForFence(self: SwapImage, dev: *const vk.DeviceProxy) !void {
+    fn waitForFence(self: *SwapImage, dev: *const vk.DeviceProxy) !void {
         _ = try dev.waitForFences(1, @ptrCast(&self.frame_fence), .true, std.math.maxInt(u64));
     }
 };
@@ -662,14 +742,14 @@ fn initSwapchainImages(dev: *const vk.DeviceProxy, swapchain: vk.SwapchainKHR, f
     const images = try dev.getSwapchainImagesAllocKHR(swapchain, allocator);
     defer allocator.free(images);
 
-    const swap_images = try allocator.alloc(SwapImage, images.len);
+    var swap_images = try allocator.alloc(SwapImage, images.len);
     errdefer allocator.free(swap_images);
 
     var i: usize = 0;
-    errdefer for (swap_images[0..i]) |si| si.deinit(dev, callbacks);
+    errdefer for (swap_images[0..i]) |*si| si.deinit(dev, callbacks);
 
     for (images) |image| {
-        swap_images[i] = try SwapImage.init(dev, image, format, queue, callbacks);
+        swap_images[i] = try SwapImage.init(dev, image, format, queue, allocator, callbacks);
         i += 1;
     }
 
@@ -745,3 +825,74 @@ fn subresourceRange(mask: vk.ImageAspectFlags) vk.ImageSubresourceRange {
         .level_count = vk.REMAINING_MIP_LEVELS,
     };
 }
+
+// ============================ Deletion Queue ====================
+
+// TODO: Find a way to use comptime to reduce repetition here.
+const DeletionQueue = struct {
+    buffers: std.ArrayList(vk.Buffer) = .empty,
+    images: std.ArrayList(vk.Image) = .empty,
+    swapchains: std.ArrayList(vk.SwapchainKHR) = .empty,
+    imageviews: std.ArrayList(vk.ImageView) = .empty,
+    semaphores: std.ArrayList(vk.Semaphore) = .empty,
+    fences: std.ArrayList(vk.Fence) = .empty,
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator) DeletionQueue {
+        return .{
+            .allocator = allocator,
+        };
+    }
+
+    /// Free the deletion queue itself, remember to flush first.
+    pub fn deinit(self: *DeletionQueue) void {
+        self.buffers.clearAndFree(self.allocator);
+        self.swapchains.clearAndFree(self.allocator);
+        self.images.clearAndFree(self.allocator);
+        self.imageviews.clearAndFree(self.allocator);
+        self.semaphores.clearAndFree(self.allocator);
+        self.fences.clearAndFree(self.allocator);
+    }
+
+    pub fn queue(self: *DeletionQueue, vk_elem: anytype) !void {
+        switch (@TypeOf(vk_elem)) {
+            vk.Buffer => {
+                try self.buffers.append(self.allocator, vk_elem);
+            },
+            vk.Image => {
+                try self.images.append(self.allocator, vk_elem);
+            },
+            vk.SwapchainKHR => {
+                try self.swapchains.append(self.allocator, vk_elem);
+            },
+            vk.ImageView => {
+                try self.imageviews.append(self.allocator, vk_elem);
+            },
+            vk.Semaphore => {
+                try self.semaphores.append(self.allocator, vk_elem);
+            },
+            vk.Fence => {
+                try self.fences.append(self.allocator, vk_elem);
+            },
+            else => {
+                @compileError("Attempted to queue unsupported type");
+            },
+        }
+    }
+
+    /// Flush deletion queue, queues retain their maximum capacity for performance reasons.
+    pub fn flush(self: *DeletionQueue, dev: *const vk.DeviceProxy, callbacks: *vk.AllocationCallbacks) void {
+        for (self.buffers.items) |b| dev.destroyBuffer(b, callbacks);
+        self.buffers.clearRetainingCapacity();
+        for (self.fences.items) |f| dev.destroyFence(f, callbacks);
+        self.fences.clearRetainingCapacity();
+        for (self.semaphores.items) |s| dev.destroySemaphore(s, callbacks);
+        self.semaphores.clearRetainingCapacity();
+        for (self.imageviews.items) |iv| dev.destroyImageView(iv, callbacks);
+        self.imageviews.clearRetainingCapacity();
+        for (self.images.items) |i| dev.destroyImage(i, callbacks);
+        self.images.clearRetainingCapacity();
+        for (self.swapchains.items) |s| dev.destroySwapchainKHR(s, callbacks);
+        self.swapchains.clearRetainingCapacity();
+    }
+};
