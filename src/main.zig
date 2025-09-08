@@ -1,67 +1,16 @@
 const std = @import("std");
-const c = @import("c.zig");
-const Vulkan = @import("vulkan.zig").Vulkan;
-const Swapchain = @import("swapchain.zig").Swapchain;
-const Allocator = std.mem.Allocator;
 const vk = @import("vulkan");
-const vert_spv align(@alignOf(u32)) = @embedFile("vertex_shader").*;
-const frag_spv align(@alignOf(u32)) = @embedFile("fragment_shader").*;
-const zlm = @import("zlm").as(f32);
+const c = @import("c.zig");
 
-const MIN_IMAGE_COUNT = 2;
+const Allocator = std.mem.Allocator;
 
-fn check_vk_result(err: c.c.VkResult) callconv(std.builtin.CallingConvention.c) void {
-    if (err == 0) return;
-    std.debug.print("[vulkan] Error: VkResult = {d}\n", .{err});
-    if (err < 0) std.process.exit(1);
-}
+const APP_NAME = "WorkingAppTitle";
+const ENGINE_NAME = "WorkingEngineTitle";
 
-const Vertex = struct {
-    const binding_description = vk.VertexInputBindingDescription{
-        .binding = 0,
-        .stride = @sizeOf(Vertex),
-        .input_rate = .vertex,
-    };
-
-    const attribute_description = [_]vk.VertexInputAttributeDescription{
-        .{
-            .binding = 0,
-            .location = 0,
-            .format = .r32g32_sfloat,
-            .offset = @offsetOf(Vertex, "pos"),
-        },
-        .{
-            .binding = 0,
-            .location = 1,
-            .format = .r32g32_sfloat,
-            .offset = @offsetOf(Vertex, "uv"),
-        },
-    };
-
-    pos: zlm.Vec2,
-    uv: zlm.Vec2,
+const required_layers = [_][*:0]const u8{
+    "VK_LAYER_KHRONOS_validation",
 };
-
-const vertices = [_]Vertex{
-    .{ .pos = .{ .x = 0, .y = -0.5 }, .uv = .{ .x = 0.5, .y = 1 } },
-    .{ .pos = .{ .x = 0.5, .y = 0.5 }, .uv = .{ .x = 1, .y = 0 } },
-    .{ .pos = .{ .x = -0.5, .y = 0.5 }, .uv = .{ .x = 0, .y = 0 } },
-};
-fn glfw_error_callback(err: c_int, description: [*c]const u8) callconv(std.builtin.CallingConvention.c) void {
-    std.debug.print("GLFW Error {d}: {s}\n", .{ err, description });
-}
-
-fn key_callback(window: ?*c.GLFWwindow, key: c_int, scancode: c_int, pressed: c_int, mods: c_int) callconv(std.builtin.CallingConvention.c) void {
-    _ = scancode;
-    if (key == c.c.GLFW_KEY_R and pressed == 1 and (mods & c.c.GLFW_MOD_SHIFT) != 0) {}
-    if (key == c.c.GLFW_KEY_ESCAPE) {
-        c.c.glfwSetWindowShouldClose(window, c.GLFW_TRUE);
-    }
-}
-
-fn loader(name: [*c]const u8, instance: ?*anyopaque) callconv(std.builtin.CallingConvention.c) ?*const fn () callconv(std.builtin.CallingConvention.c) void {
-    return c.glfwGetInstanceProcAddress(@enumFromInt(@intFromPtr(instance)), name);
-}
+const required_device_extensions = [_][*:0]const u8{vk.extensions.khr_swapchain.name};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
@@ -77,12 +26,13 @@ pub fn main() !void {
 
     if (c.glfwVulkanSupported() == 0) return error.VulkanNotSupported;
 
-    var extent = vk.Extent2D{ .width = 800, .height = 600 };
+    const extent = vk.Extent2D{ .width = 800, .height = 600 };
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
+    c.glfwWindowHint(c.c.GLFW_RESIZABLE, c.GLFW_FALSE);
     const window = c.glfwCreateWindow(
         @intCast(extent.width),
         @intCast(extent.height),
-        "Engine",
+        APP_NAME,
         null,
         null,
     );
@@ -91,604 +41,565 @@ pub fn main() !void {
 
     _ = c.glfwSetKeyCallback(window, key_callback);
 
-    // ========= Vulkan ============
-    extent.width, extent.height = blk: {
-        var w: c_int = undefined;
-        var h: c_int = undefined;
-        c.glfwGetFramebufferSize(window, &w, &h);
-        break :blk .{ @intCast(w), @intCast(h) };
+    // ============= Vulkan ==============
+    const vk_allocator = try VkAllocator.init(allocator);
+    defer vk_allocator.deinit();
+
+    const vkb = vk.BaseWrapper.load(c.glfwGetInstanceProcAddress);
+
+    var extension_names: std.ArrayList([*:0]const u8) = .empty;
+    defer extension_names.deinit(allocator);
+    try extension_names.append(allocator, vk.extensions.ext_debug_utils.name);
+    // the following extensions are to support vulkan in mac os
+    // see https://github.com/glfw/glfw/issues/2335
+    try extension_names.append(allocator, vk.extensions.khr_portability_enumeration.name);
+    try extension_names.append(allocator, vk.extensions.khr_get_physical_device_properties_2.name);
+
+    var glfw_exts_count: u32 = 0;
+    const glfw_exts = c.glfwGetRequiredInstanceExtensions(&glfw_exts_count);
+    try extension_names.appendSlice(allocator, @ptrCast(glfw_exts[0..glfw_exts_count]));
+
+    const create_info = vk.InstanceCreateInfo{
+        .p_application_info = &.{
+            .p_application_name = APP_NAME,
+            .application_version = @bitCast(vk.makeApiVersion(0, 0, 0, 0)),
+            .p_engine_name = ENGINE_NAME,
+            .engine_version = @bitCast(vk.makeApiVersion(0, 0, 0, 0)),
+            .api_version = @bitCast(vk.API_VERSION_1_3),
+        },
+        .enabled_extension_count = @intCast(extension_names.items.len),
+        .pp_enabled_extension_names = extension_names.items.ptr,
+        .enabled_layer_count = 1,
+        .pp_enabled_layer_names = &required_layers,
+        // enumerate_portability_bit_khr to support vulkan in mac os
+        // see https://github.com/glfw/glfw/issues/2335
+        .flags = .{ .enumerate_portability_bit_khr = true },
     };
-    var v = try Vulkan.init(allocator, "test", window.?);
-    defer v.deinit();
+    const instance_raw = try vkb.createInstance(&create_info, &vk_allocator.callbacks);
+    const vki = try allocator.create(vk.InstanceWrapper);
+    defer allocator.destroy(vki);
+    vki.* = vk.InstanceWrapper.load(instance_raw, vkb.dispatch.vkGetInstanceProcAddr.?);
+    const instance = vk.InstanceProxy.init(instance_raw, vki);
+    defer instance.destroyInstance(&vk_allocator.callbacks);
 
-    std.log.debug("Using device: {s}", .{v.deviceName()});
+    const debug_messenger = try instance.createDebugUtilsMessengerEXT(&.{
+        .message_severity = .{
+            //.verbose_bit_ext = true,
+            //.info_bit_ext = true,
+            .warning_bit_ext = true,
+            .error_bit_ext = true,
+        },
+        .message_type = .{
+            .general_bit_ext = true,
+            .validation_bit_ext = true,
+            .performance_bit_ext = true,
+        },
+        .pfn_user_callback = &debugUtilsMessengerCallback,
+        .p_user_data = null,
+    }, &vk_allocator.callbacks);
+    instance.destroyDebugUtilsMessengerEXT(debug_messenger, &vk_allocator.callbacks);
 
-    var swapchain = try Swapchain.init(&v, allocator, extent);
-    defer swapchain.deinit();
+    std.debug.print("Vulkan instance created.\n", .{});
+    vk_allocator.report();
+    vk_allocator.reset_counts();
+    var surface: vk.SurfaceKHR = undefined;
+    if (c.glfwCreateWindowSurface(instance.handle, window.?, &vk_allocator.callbacks, &surface) != .success) {
+        return error.SurfaceInitFailed;
+    }
+    defer instance.destroySurfaceKHR(surface, &vk_allocator.callbacks);
 
-    const pipeline_layout = try v.dev.createPipelineLayout(&.{
-        .flags = .{},
-        .set_layout_count = 0,
-        .p_set_layouts = undefined,
-        .push_constant_range_count = 0,
-        .p_push_constant_ranges = undefined,
-    }, null);
-    defer v.dev.destroyPipelineLayout(pipeline_layout, null);
+    std.debug.print("Vulkan surface created.\n", .{});
+    vk_allocator.report();
+    vk_allocator.reset_counts();
 
-    const render_pass = try createRenderPass(&v, swapchain);
-    defer v.dev.destroyRenderPass(render_pass, null);
+    const pdevs = try instance.enumeratePhysicalDevicesAlloc(allocator);
+    const tmp = pdevs[0];
+    pdevs[0] = pdevs[1];
+    pdevs[1] = tmp;
+    defer allocator.free(pdevs);
 
-    const pipeline = try createPipeline(&v, pipeline_layout, render_pass);
-    defer v.dev.destroyPipeline(pipeline, null);
+    var current_candidate: ?DeviceCandidate = null;
+    for (pdevs) |pdev| {
+        if (try checkSuitable(instance, pdev, allocator, surface, current_candidate)) |candidate| {
+            current_candidate = candidate;
+        }
+    }
+    if (current_candidate == null) {
+        return error.NoSuitablePhysicalDevice;
+    }
+    const pdev = current_candidate.?.pdev;
+    // const props = current_candidate.?.props;
 
-    var framebuffers = try createFramebuffers(&v, allocator, render_pass, swapchain);
-    defer destroyFramebuffers(&v, allocator, framebuffers);
+    std.debug.print("Physical device selected: {s}\n", .{std.mem.sliceTo(&current_candidate.?.props.device_name, 0)});
 
-    const pool = try v.dev.createCommandPool(&.{
-        .queue_family_index = v.graphics_queue.family,
-    }, null);
-    defer v.dev.destroyCommandPool(pool, null);
+    const raw_dev = try initializeCandidate(instance, current_candidate.?, &vk_allocator.callbacks);
 
-    const buffer = try v.dev.createBuffer(&.{
-        .size = @sizeOf(@TypeOf(vertices)),
-        .usage = .{ .transfer_dst_bit = true, .vertex_buffer_bit = true },
-        .sharing_mode = .exclusive,
-    }, null);
-    defer v.dev.destroyBuffer(buffer, null);
-    const mem_reqs = v.dev.getBufferMemoryRequirements(buffer);
-    const memory = try v.allocate(mem_reqs, .{ .device_local_bit = true });
-    defer v.dev.freeMemory(memory, null);
-    try v.dev.bindBufferMemory(buffer, memory, 0);
+    const vkd = try allocator.create(vk.DeviceWrapper);
+    defer allocator.destroy(vkd);
+    vkd.* = vk.DeviceWrapper.load(raw_dev, instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
+    const dev = vk.DeviceProxy.init(raw_dev, vkd);
+    defer dev.destroyDevice(&vk_allocator.callbacks);
+    std.debug.print("Vulkan device created.\n", .{});
+    vk_allocator.report();
+    vk_allocator.reset_counts();
 
-    try uploadVertices(&v, pool, buffer);
+    const graphics_queue = Queue.init(dev, current_candidate.?.queues.graphics_family);
+    const present_queue = Queue.init(dev, current_candidate.?.queues.present_family);
 
-    var cmdbufs = try createCommandBuffers(
-        &v,
-        pool,
-        allocator,
-        buffer,
-        swapchain.extent,
-        render_pass,
-        pipeline,
-        framebuffers,
-    );
-    defer destroyCommandBuffers(&v, pool, allocator, cmdbufs);
+    const mem_props = instance.getPhysicalDeviceMemoryProperties(pdev);
 
-    // ========= IMGUI ===============
-    if (!c.c.cImGui_ImplVulkan_LoadFunctions(@as(u32, @bitCast(vk.API_VERSION_1_2)), loader)) return error.ImGuiVulkanLoadFailure;
+    std.debug.print("\n{any}\n", .{mem_props});
 
-    // Setup Dear ImGui context
-    if (c.c.ImGui_CreateContext(null) == null) return error.ImGuiCreateContextFailure;
-    defer c.c.ImGui_DestroyContext(null);
-    const io = c.c.ImGui_GetIO(); // (void)io;
-    io.*.ConfigFlags |= c.c.ImGuiConfigFlags_NavEnableKeyboard; // Enable Keyboard Controls
-    io.*.ConfigFlags |= c.c.ImGuiConfigFlags_NavEnableGamepad; // Enable Gamepad Controls
-    io.*.ConfigFlags |= c.c.ImGuiConfigFlags_DockingEnable;
+    // ================== SwapChain ===================
 
-    // Setup Dear ImGui style
-    c.c.ImGui_StyleColorsDark(null);
-    const pool_sizes = [_]vk.DescriptorPoolSize{
+    const format = try findSurfaceFormat(instance, pdev, surface, allocator);
+    const swapchain = blk: {
+        const caps = try instance.getPhysicalDeviceSurfaceCapabilitiesKHR(pdev, surface);
+        const actual_extent = findActualExtent(caps, extent);
+
+        if (actual_extent.width == 0 or actual_extent.height == 0) {
+            return error.InvalidSurfaceDimensions;
+        }
+
+        const qfi = [_]u32{ graphics_queue.family, present_queue.family };
+        const sharing_mode: vk.SharingMode = if (graphics_queue.family != present_queue.family)
+            .concurrent
+        else
+            .exclusive;
+
+        var image_count = caps.min_image_count + 1;
+
+        if (caps.max_image_count > 0) {
+            image_count = @min(image_count, caps.max_image_count);
+        }
+
+        const info = vk.SwapchainCreateInfoKHR{
+            .image_format = format.format,
+            .image_color_space = .srgb_nonlinear_khr,
+            .present_mode = try findPresentMode(instance, pdev, surface, allocator),
+            .image_extent = actual_extent,
+            .image_usage = .{ .transfer_dst_bit = true, .color_attachment_bit = true },
+            .min_image_count = image_count,
+            .surface = surface,
+            .image_array_layers = 1,
+            .image_sharing_mode = sharing_mode,
+            .clipped = .true,
+            .old_swapchain = .null_handle,
+            .composite_alpha = .{ .opaque_bit_khr = true },
+            .pre_transform = caps.current_transform,
+            .p_queue_family_indices = &qfi,
+            .queue_family_index_count = qfi.len,
+        };
+        const handle = try dev.createSwapchainKHR(&info, &vk_allocator.callbacks);
+        break :blk handle;
+    };
+    defer dev.destroySwapchainKHR(swapchain, &vk_allocator.callbacks);
+
+    const swap_images = try initSwapchainImages(&dev, swapchain, format.format, allocator, &vk_allocator.callbacks);
+    defer allocator.free(swap_images);
+    defer for (swap_images) |si| si.deinit(&dev, &vk_allocator.callbacks);
+    std.debug.print("\n== Swapchain created ==\n", .{});
+    vk_allocator.report();
+    vk_allocator.reset_counts();
+}
+
+// ================== Callbacks for GLFW ====================
+
+fn glfw_error_callback(err: c_int, description: [*c]const u8) callconv(std.builtin.CallingConvention.c) void {
+    std.debug.print("GLFW Error {d}: {s}\n", .{ err, description });
+}
+
+fn key_callback(window: ?*c.GLFWwindow, key: c_int, scancode: c_int, pressed: c_int, mods: c_int) callconv(std.builtin.CallingConvention.c) void {
+    _ = scancode;
+    if (key == c.c.GLFW_KEY_R and pressed == 1 and (mods & c.c.GLFW_MOD_SHIFT) != 0) {}
+    if (key == c.c.GLFW_KEY_ESCAPE) {
+        c.c.glfwSetWindowShouldClose(window, c.GLFW_TRUE);
+    }
+}
+
+// =================== VK Allocator =========================
+
+const Allocation = struct {
+    size: usize,
+    alignment: std.mem.Alignment,
+    scope: vk.SystemAllocationScope,
+};
+
+const VkAllocator = struct {
+    allocator: Allocator,
+    allocations: std.AutoHashMap(?*anyopaque, Allocation),
+    callbacks: vk.AllocationCallbacks,
+    alloc_count: usize,
+    realloc_count: usize,
+
+    pub fn init(allocator: Allocator) !*VkAllocator {
+        var self: *VkAllocator = try allocator.create(VkAllocator);
+        self.allocator = allocator;
+        self.allocations = .init(allocator);
+        self.callbacks = .{
+            .p_user_data = @ptrCast(self),
+            .pfn_allocation = allocate,
+            .pfn_reallocation = reallocate,
+            .pfn_free = free,
+        };
+        self.alloc_count = 0;
+        self.realloc_count = 0;
+        return self;
+    }
+
+    pub fn deinit(self: *VkAllocator) void {
+        self.allocations.clearAndFree();
+        self.allocator.destroy(self);
+    }
+
+    fn allocate(p_user_data: ?*anyopaque, size: usize, raw_alignment: usize, scope: vk.SystemAllocationScope) callconv(.c) ?*anyopaque {
+        const self: *VkAllocator = @ptrCast(@alignCast(p_user_data));
+        const alignment = std.mem.Alignment.fromByteUnits(raw_alignment);
+        const ret = self.allocator.rawAlloc(size, alignment, @returnAddress());
+
+        self.allocations.put(ret, .{
+            .size = size,
+            .alignment = alignment,
+            .scope = scope,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => {
+                std.debug.print("Out of memory while allocating {d} bytes\n", .{size});
+                return null;
+            },
+        };
+        self.alloc_count += 1;
+        return @ptrCast(ret);
+    }
+
+    fn reallocate(p_user_data: ?*anyopaque, ptr: ?*anyopaque, size: usize, raw_alignment: usize, scope: vk.SystemAllocationScope) callconv(.c) ?*anyopaque {
+        const self: *VkAllocator = @ptrCast(@alignCast(p_user_data));
+        const allocation = self.allocations.get(ptr) orelse {
+            return null;
+        };
+
+        const ret = allocate(p_user_data, size, raw_alignment, scope);
+        const copy_len = @min(size, allocation.size);
+        const cast_ptr: [*c]u8 = @ptrCast(ptr);
+        const cast_ret: [*c]u8 = @ptrCast(ret);
+        @memcpy(cast_ret[0..copy_len], cast_ptr[0..copy_len]);
+        free(p_user_data, ptr);
+        self.realloc_count += 1;
+        self.alloc_count -= 1;
+        return @ptrCast(ret);
+    }
+
+    fn free(p_user_data: ?*anyopaque, ptr: ?*anyopaque) callconv(.c) void {
+        const self: *VkAllocator = @ptrCast(@alignCast(p_user_data));
+        const allocation = self.allocations.get(ptr) orelse {
+            std.debug.print("Freeing unknown ptr {any} in VkAllocator\n", .{ptr});
+            return;
+        };
+        const cast_ptr: [*c]u8 = @ptrCast(ptr);
+        self.allocator.rawFree(cast_ptr[0..allocation.size], allocation.alignment, @returnAddress());
+        _ = self.allocations.remove(ptr);
+    }
+
+    pub fn reset_counts(self: *VkAllocator) void {
+        self.alloc_count = 0;
+        self.realloc_count = 0;
+    }
+
+    pub fn report(self: *const VkAllocator) void {
+        var it = self.allocations.keyIterator();
+        var total_mem: usize = 0;
+        var total_allocs: usize = 0;
+        while (it.next()) |k| {
+            const allocation = self.allocations.get(k.*).?;
+            total_mem += allocation.size;
+            total_allocs += 1;
+        }
+        std.debug.print("{} allocations.\n", .{self.alloc_count});
+        std.debug.print("{} reallocations.\n", .{self.realloc_count});
+        std.debug.print("Total memory usage: {} bytes over {} allocations\n", .{ total_mem, total_allocs });
+    }
+};
+
+fn debugUtilsMessengerCallback(severity: vk.DebugUtilsMessageSeverityFlagsEXT, msg_type: vk.DebugUtilsMessageTypeFlagsEXT, callback_data: ?*const vk.DebugUtilsMessengerCallbackDataEXT, _: ?*anyopaque) callconv(.c) vk.Bool32 {
+    const severity_str = if (severity.verbose_bit_ext) "verbose" else if (severity.info_bit_ext) "info" else if (severity.warning_bit_ext) "warning" else if (severity.error_bit_ext) "error" else "unknown";
+
+    const type_str = if (msg_type.general_bit_ext) "general" else if (msg_type.validation_bit_ext) "validation" else if (msg_type.performance_bit_ext) "performance" else if (msg_type.device_address_binding_bit_ext) "device addr" else "unknown";
+
+    const message: [*c]const u8 = if (callback_data) |cb_data| cb_data.p_message else "NO MESSAGE!";
+    std.debug.print("[{s}][{s}]. Message:\n  {s}\n", .{ severity_str, type_str, message });
+
+    return .false;
+}
+
+// ================ Physical Device Selection ===============
+
+pub const Queue = struct {
+    handle: vk.Queue,
+    family: u32,
+
+    fn init(device: vk.DeviceProxy, family: u32) Queue {
+        return .{
+            .handle = device.getDeviceQueue(family, 0),
+            .family = family,
+        };
+    }
+};
+
+fn initializeCandidate(instance: vk.InstanceProxy, candidate: DeviceCandidate, callbacks: ?*const vk.AllocationCallbacks) !vk.Device {
+    const priority = [_]f32{1};
+    const qci = [_]vk.DeviceQueueCreateInfo{
         .{
-            .type = .combined_image_sampler,
-            .descriptor_count = 1,
+            .queue_family_index = candidate.queues.graphics_family,
+            .queue_count = 1,
+            .p_queue_priorities = &priority,
+        },
+        .{
+            .queue_family_index = candidate.queues.present_family,
+            .queue_count = 1,
+            .p_queue_priorities = &priority,
         },
     };
-    var pool_info = vk.DescriptorPoolCreateInfo{
-        .flags = .{ .free_descriptor_set_bit = true },
-        .max_sets = 1,
-        .pool_size_count = pool_sizes.len,
-        .p_pool_sizes = @ptrCast(&pool_sizes),
+
+    const queue_count: u32 = if (candidate.queues.graphics_family == candidate.queues.present_family)
+        1
+    else
+        2;
+
+    var vk_13_features = vk.PhysicalDeviceVulkan13Features{
+        .dynamic_rendering = .true,
+        .synchronization_2 = .true,
     };
-    const descriptorPool = try v.dev.createDescriptorPool(&pool_info, null);
-    defer v.dev.destroyDescriptorPool(descriptorPool, null);
 
-    // Setup Platform/Renderer backends
-    if (!c.c.cImGui_ImplGlfw_InitForVulkan(window, true)) return error.ImGuiGlfwInitForVulkanFailure;
-    defer c.c.cImGui_ImplGlfw_Shutdown();
-    var init_info = c.c.ImGui_ImplVulkan_InitInfo{};
-    init_info.Instance = @ptrFromInt(@intFromEnum(v.instance.handle));
-    init_info.PhysicalDevice = @ptrFromInt(@intFromEnum(v.pdev));
-    init_info.Device = @ptrFromInt(@intFromEnum(v.dev.handle));
-    init_info.Queue = @ptrFromInt(@intFromEnum(v.graphics_queue.handle));
-    init_info.RenderPass = @ptrFromInt(@intFromEnum(render_pass));
-    init_info.DescriptorPool = @ptrFromInt(@intFromEnum(descriptorPool));
-    init_info.MinImageCount = MIN_IMAGE_COUNT;
-    init_info.ImageCount = @truncate(swapchain.swap_images.len);
-    init_info.MSAASamples = c.c.VK_SAMPLE_COUNT_1_BIT;
-    init_info.CheckVkResultFn = check_vk_result;
-    if (!c.c.cImGui_ImplVulkan_Init(&init_info)) return error.ImGuiVulkanInitFailure;
-    defer c.c.cImGui_ImplVulkan_Shutdown();
-
-    // Our state
-    var x: f32 = 0;
-    var y: f32 = 0;
-    var counter: i32 = 1;
-    const clear_color: c.c.ImVec4 = .{ .x = 0.45, .y = 0.55, .z = 0.6, .w = 1.0 };
-    const clear_color_slice = try allocator.alloc(f32, 3);
-    defer allocator.free(clear_color_slice);
-    clear_color_slice[0] = clear_color.x;
-    clear_color_slice[1] = clear_color.y;
-    clear_color_slice[2] = clear_color.z;
-
-    // ========= Run loop
-
-    var invalid_frame_buffers = [_]u1{0} ** 32;
-    var state: Swapchain.PresentState = .optimal;
-    while (c.glfwWindowShouldClose(window) == 0) {
-        var w: c_int = undefined;
-        var h: c_int = undefined;
-        c.glfwGetFramebufferSize(window, &w, &h);
-
-        // Don't present or resize swapchain while the window is minimized
-
-        const cmdbuf = cmdbufs[swapchain.image_index];
-
-        if (state == .suboptimal or extent.width != @as(u32, @intCast(w)) or extent.height != @as(u32, @intCast(h))) {
-            for (0..invalid_frame_buffers.len) |i| {
-                invalid_frame_buffers[i] = 0;
-            }
-            extent.width = @intCast(w);
-            extent.height = @intCast(h);
-            try swapchain.recreate(extent);
-
-            destroyFramebuffers(&v, allocator, framebuffers);
-            framebuffers = try createFramebuffers(&v, allocator, render_pass, swapchain);
-
-            destroyCommandBuffers(&v, pool, allocator, cmdbufs);
-            cmdbufs = try createCommandBuffers(
-                &v,
-                pool,
-                allocator,
-                buffer,
-                swapchain.extent,
-                render_pass,
-                pipeline,
-                framebuffers,
-            );
-        }
-
-        const cmd_buffer = &cmdbufs[swapchain.image_index];
-        const framebuffer = &framebuffers[swapchain.image_index];
-
-        try start_frame(&v, pool, swapchain.currentSwapImage().frame_fence, cmd_buffer, extent, render_pass, pipeline, framebuffer);
-        {
-            const offset = [_]vk.DeviceSize{0};
-            v.dev.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&buffer), &offset);
-            v.dev.cmdDraw(cmdbuf, vertices.len, 1, 0, 0);
-
-            c.c.cImGui_ImplVulkan_NewFrame();
-            c.c.cImGui_ImplGlfw_NewFrame();
-            c.c.ImGui_NewFrame();
-            const winclass = c.c.ImGuiWindowClass{
-                .ClassId = 0,
-                .ViewportFlagsOverrideClear = 1,
-                .DockingAllowUnclassed = true,
-            };
-
-            c.c.ImGui_PushStyleColorImVec4(c.c.ImGuiCol_DockingEmptyBg, c.c.ImVec4{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 0.0 });
-            c.c.ImGui_PushStyleColorImVec4(c.c.ImGuiCol_WindowBg, c.c.ImVec4{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 0.0 });
-            _ = c.c.ImGui_DockSpaceOverViewportEx(0, null, 0, &winclass);
-            c.c.ImGui_PopStyleColor();
-            c.c.ImGui_PopStyleColor();
-
-            defer {
-                c.c.ImGui_Render();
-                const draw_data = c.c.ImGui_GetDrawData();
-                const is_minimized = (draw_data.*.DisplaySize.x <= 0.0 or draw_data.*.DisplaySize.y <= 0.0);
-                if (!is_minimized) {
-                    c.c.cImGui_ImplVulkan_RenderDrawData(draw_data, @ptrFromInt(@intFromEnum(cmd_buffer.*)));
-                }
-            }
-            // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
-
-            {
-                _ = c.c.ImGui_Begin("Hello, world!", null, 0);
-                defer c.c.ImGui_End();
-
-                c.c.ImGui_Text("Position");
-
-                _ = c.c.ImGui_SliderFloat("x", &x, -0.5, 0.5);
-                _ = c.c.ImGui_SliderFloat("y", &y, -0.5, 0.5);
-                _ = c.c.ImGui_ColorEdit3("clear color", clear_color_slice.ptr, 0);
-
-                if (c.c.ImGui_Button("Button")) counter += 1;
-                c.c.ImGui_SameLine();
-                c.c.ImGui_Text("counter = %d", counter);
-
-                c.c.ImGui_Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0 / io.*.Framerate, io.*.Framerate);
-            }
-        }
-
-        try end_frame(&v, cmd_buffer);
-        state = swapchain.present(cmdbuf) catch |err| switch (err) {
-            error.OutOfDateKHR => Swapchain.PresentState.suboptimal,
-            else => |narrow| return narrow,
-        };
-        c.glfwPollEvents();
-    }
-
-    try swapchain.waitForAllFences();
-    try v.dev.deviceWaitIdle();
+    var vk_12_features = vk.PhysicalDeviceVulkan12Features{
+        .buffer_device_address = .true,
+        .descriptor_indexing = .true,
+        .p_next = @ptrCast(&vk_13_features),
+    };
+    return try instance.createDevice(candidate.pdev, &.{
+        .queue_create_info_count = queue_count,
+        .p_queue_create_infos = &qci,
+        .enabled_extension_count = required_device_extensions.len,
+        .pp_enabled_extension_names = @ptrCast(&required_device_extensions),
+        .p_next = @ptrCast(&vk_12_features),
+    }, callbacks);
 }
 
-fn uploadVertices(v: *const Vulkan, pool: vk.CommandPool, buffer: vk.Buffer) !void {
-    const staging_buffer = try v.dev.createBuffer(&.{
-        .size = @sizeOf(@TypeOf(vertices)),
-        .usage = .{ .transfer_src_bit = true },
-        .sharing_mode = .exclusive,
-    }, null);
-    defer v.dev.destroyBuffer(staging_buffer, null);
-    const mem_reqs = v.dev.getBufferMemoryRequirements(staging_buffer);
-    const staging_memory = try v.allocate(mem_reqs, .{ .host_visible_bit = true, .host_coherent_bit = true });
-    defer v.dev.freeMemory(staging_memory, null);
-    try v.dev.bindBufferMemory(staging_buffer, staging_memory, 0);
+const DeviceCandidate = struct {
+    pdev: vk.PhysicalDevice,
+    props: vk.PhysicalDeviceProperties,
+    queues: QueueAllocation,
+};
 
-    {
-        const data = try v.dev.mapMemory(staging_memory, 0, vk.WHOLE_SIZE, .{});
-        defer v.dev.unmapMemory(staging_memory);
+const QueueAllocation = struct {
+    graphics_family: u32,
+    present_family: u32,
+};
 
-        const gpu_vertices: [*]Vertex = @ptrCast(@alignCast(data));
-        @memcpy(gpu_vertices, vertices[0..]);
-    }
-
-    try copyBuffer(v, pool, buffer, staging_buffer, @sizeOf(@TypeOf(vertices)));
-}
-
-fn copyBuffer(v: *const Vulkan, pool: vk.CommandPool, dst: vk.Buffer, src: vk.Buffer, size: vk.DeviceSize) !void {
-    var cmdbuf_handle: vk.CommandBuffer = undefined;
-    try v.dev.allocateCommandBuffers(&.{
-        .command_pool = pool,
-        .level = .primary,
-        .command_buffer_count = 1,
-    }, @ptrCast(&cmdbuf_handle));
-    defer v.dev.freeCommandBuffers(pool, 1, @ptrCast(&cmdbuf_handle));
-
-    const cmdbuf = Vulkan.CommandBuffer.init(cmdbuf_handle, v.dev.wrapper);
-
-    try cmdbuf.beginCommandBuffer(&.{
-        .flags = .{ .one_time_submit_bit = true },
-    });
-
-    const region = vk.BufferCopy{
-        .src_offset = 0,
-        .dst_offset = 0,
-        .size = size,
-    };
-    cmdbuf.copyBuffer(src, dst, 1, @ptrCast(&region));
-
-    try cmdbuf.endCommandBuffer();
-
-    const si = vk.SubmitInfo{
-        .command_buffer_count = 1,
-        .p_command_buffers = (&cmdbuf.handle)[0..1],
-        .p_wait_dst_stage_mask = undefined,
-    };
-    try v.dev.queueSubmit(v.graphics_queue.handle, 1, @ptrCast(&si), .null_handle);
-    try v.dev.queueWaitIdle(v.graphics_queue.handle);
-}
-
-fn start_frame(
-    v: *const Vulkan,
-    pool: vk.CommandPool,
-    fence: vk.Fence,
-    cmd_buffer: *vk.CommandBuffer,
-    extent: vk.Extent2D,
-    render_pass: vk.RenderPass,
-    pipeline: vk.Pipeline,
-    framebuffer: *vk.Framebuffer,
-) !void {
-    _ = try v.dev.waitForFences(1, @ptrCast(&fence), .true, std.math.maxInt(u64));
-    v.dev.freeCommandBuffers(pool, 1, @ptrCast(cmd_buffer));
-    try v.dev.allocateCommandBuffers(&.{
-        .command_pool = pool,
-        .level = .primary,
-        .command_buffer_count = 1,
-    }, @ptrCast(cmd_buffer));
-
-    const clear = vk.ClearValue{
-        .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
-    };
-
-    const viewport = vk.Viewport{
-        .x = 0,
-        .y = 0,
-        .width = @floatFromInt(extent.width),
-        .height = @floatFromInt(extent.height),
-        .min_depth = 0,
-        .max_depth = 1,
-    };
-
-    const scissor = vk.Rect2D{
-        .offset = .{ .x = 0, .y = 0 },
-        .extent = extent,
-    };
-
-    try v.dev.beginCommandBuffer(cmd_buffer.*, &.{});
-
-    v.dev.cmdSetViewport(cmd_buffer.*, 0, 1, @ptrCast(&viewport));
-    v.dev.cmdSetScissor(cmd_buffer.*, 0, 1, @ptrCast(&scissor));
-
-    // This needs to be a separate definition - see https://github.com/ziglang/zig/issues/7627.
-    const render_area = vk.Rect2D{
-        .offset = .{ .x = 0, .y = 0 },
-        .extent = extent,
-    };
-
-    v.dev.cmdBeginRenderPass(cmd_buffer.*, &.{
-        .render_pass = render_pass,
-        .framebuffer = framebuffer.*,
-        .render_area = render_area,
-        .clear_value_count = 1,
-        .p_clear_values = @ptrCast(&clear),
-    }, .@"inline");
-
-    v.dev.cmdBindPipeline(cmd_buffer.*, .graphics, pipeline);
-}
-
-fn end_frame(
-    v: *const Vulkan,
-    cmd_buffer: *vk.CommandBuffer,
-) !void {
-    v.dev.cmdEndRenderPass(cmd_buffer.*);
-    try v.dev.endCommandBuffer(cmd_buffer.*);
-}
-
-fn createCommandBuffers(
-    v: *const Vulkan,
-    pool: vk.CommandPool,
+fn checkSuitable(
+    instance: vk.InstanceProxy,
+    pdev: vk.PhysicalDevice,
     allocator: Allocator,
-    buffer: vk.Buffer,
-    extent: vk.Extent2D,
-    render_pass: vk.RenderPass,
-    pipeline: vk.Pipeline,
-    framebuffers: []vk.Framebuffer,
-) ![]vk.CommandBuffer {
-    const cmdbufs = try allocator.alloc(vk.CommandBuffer, framebuffers.len);
-    errdefer allocator.free(cmdbufs);
-
-    try v.dev.allocateCommandBuffers(&.{
-        .command_pool = pool,
-        .level = .primary,
-        .command_buffer_count = @intCast(cmdbufs.len),
-    }, cmdbufs.ptr);
-    errdefer v.dev.freeCommandBuffers(pool, @intCast(cmdbufs.len), cmdbufs.ptr);
-
-    const clear = vk.ClearValue{
-        .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
-    };
-
-    const viewport = vk.Viewport{
-        .x = 0,
-        .y = 0,
-        .width = @floatFromInt(extent.width),
-        .height = @floatFromInt(extent.height),
-        .min_depth = 0,
-        .max_depth = 1,
-    };
-
-    const scissor = vk.Rect2D{
-        .offset = .{ .x = 0, .y = 0 },
-        .extent = extent,
-    };
-
-    for (cmdbufs, framebuffers) |cmdbuf, framebuffer| {
-        try v.dev.beginCommandBuffer(cmdbuf, &.{});
-
-        v.dev.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
-        v.dev.cmdSetScissor(cmdbuf, 0, 1, @ptrCast(&scissor));
-
-        // This needs to be a separate definition - see https://github.com/ziglang/zig/issues/7627.
-        const render_area = vk.Rect2D{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = extent,
-        };
-
-        v.dev.cmdBeginRenderPass(cmdbuf, &.{
-            .render_pass = render_pass,
-            .framebuffer = framebuffer,
-            .render_area = render_area,
-            .clear_value_count = 1,
-            .p_clear_values = @ptrCast(&clear),
-        }, .@"inline");
-
-        v.dev.cmdBindPipeline(cmdbuf, .graphics, pipeline);
-        const offset = [_]vk.DeviceSize{0};
-        v.dev.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&buffer), &offset);
-        v.dev.cmdDraw(cmdbuf, vertices.len, 1, 0, 0);
-
-        v.dev.cmdEndRenderPass(cmdbuf);
-        try v.dev.endCommandBuffer(cmdbuf);
+    surface: vk.SurfaceKHR,
+    current: ?DeviceCandidate,
+) !?DeviceCandidate {
+    if (!try checkExtensionSupport(instance, pdev, allocator)) {
+        return null;
     }
 
-    return cmdbufs;
+    if (!try checkSurfaceSupport(instance, pdev, surface)) {
+        return null;
+    }
+
+    if (try allocateQueues(instance, pdev, allocator, surface)) |allocation| {
+        const props = instance.getPhysicalDeviceProperties(pdev);
+        if (current == null or props.limits.max_per_stage_resources > current.?.props.limits.max_per_stage_resources) {
+            return DeviceCandidate{
+                .pdev = pdev,
+                .props = props,
+                .queues = allocation,
+            };
+        } else {
+            return null;
+        }
+    }
+
+    return null;
+}
+fn allocateQueues(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice, allocator: Allocator, surface: vk.SurfaceKHR) !?QueueAllocation {
+    const families = try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(pdev, allocator);
+    defer allocator.free(families);
+
+    var graphics_family: ?u32 = null;
+    var present_family: ?u32 = null;
+
+    for (families, 0..) |properties, i| {
+        const family: u32 = @intCast(i);
+
+        if (graphics_family == null and properties.queue_flags.graphics_bit) {
+            graphics_family = family;
+        }
+
+        if (present_family == null and (try instance.getPhysicalDeviceSurfaceSupportKHR(pdev, family, surface)) == .true) {
+            present_family = family;
+        }
+    }
+
+    if (graphics_family != null and present_family != null) {
+        return QueueAllocation{
+            .graphics_family = graphics_family.?,
+            .present_family = present_family.?,
+        };
+    }
+
+    return null;
+}
+fn checkSurfaceSupport(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice, surface: vk.SurfaceKHR) !bool {
+    var format_count: u32 = undefined;
+    _ = try instance.getPhysicalDeviceSurfaceFormatsKHR(pdev, surface, &format_count, null);
+
+    var present_mode_count: u32 = undefined;
+    _ = try instance.getPhysicalDeviceSurfacePresentModesKHR(pdev, surface, &present_mode_count, null);
+
+    return format_count > 0 and present_mode_count > 0;
 }
 
-fn destroyCommandBuffers(v: *const Vulkan, pool: vk.CommandPool, allocator: Allocator, cmdbufs: []vk.CommandBuffer) void {
-    v.dev.freeCommandBuffers(pool, @truncate(cmdbufs.len), cmdbufs.ptr);
-    allocator.free(cmdbufs);
+fn checkExtensionSupport(
+    instance: vk.InstanceProxy,
+    pdev: vk.PhysicalDevice,
+    allocator: Allocator,
+) !bool {
+    const propsv = try instance.enumerateDeviceExtensionPropertiesAlloc(pdev, null, allocator);
+    defer allocator.free(propsv);
+
+    for (required_device_extensions) |ext| {
+        for (propsv) |props| {
+            if (std.mem.eql(u8, std.mem.span(ext), std.mem.sliceTo(&props.extension_name, 0))) {
+                break;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    return true;
 }
 
-fn createFramebuffers(v: *const Vulkan, allocator: Allocator, render_pass: vk.RenderPass, swapchain: Swapchain) ![]vk.Framebuffer {
-    const framebuffers = try allocator.alloc(vk.Framebuffer, swapchain.swap_images.len);
-    errdefer allocator.free(framebuffers);
+// =============== SwapChain ============
+
+fn findActualExtent(caps: vk.SurfaceCapabilitiesKHR, extent: vk.Extent2D) vk.Extent2D {
+    if (caps.current_extent.width != 0xFFFF_FFFF) {
+        return caps.current_extent;
+    } else {
+        return .{
+            .width = std.math.clamp(extent.width, caps.min_image_extent.width, caps.max_image_extent.width),
+            .height = std.math.clamp(extent.height, caps.min_image_extent.height, caps.max_image_extent.height),
+        };
+    }
+}
+
+const SwapImage = struct {
+    image: vk.Image,
+    view: vk.ImageView,
+    image_acquired: vk.Semaphore,
+    render_finished: vk.Semaphore,
+    frame_fence: vk.Fence,
+
+    fn init(dev: *const vk.DeviceProxy, image: vk.Image, format: vk.Format, callbacks: *vk.AllocationCallbacks) !SwapImage {
+        const view = try dev.createImageView(&.{
+            .image = image,
+            .view_type = .@"2d",
+            .format = format,
+            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+            .subresource_range = .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        }, callbacks);
+        errdefer dev.destroyImageView(view, callbacks);
+
+        const image_acquired = try dev.createSemaphore(&.{}, callbacks);
+        errdefer dev.destroySemaphore(image_acquired, callbacks);
+
+        const render_finished = try dev.createSemaphore(&.{}, callbacks);
+        errdefer dev.destroySemaphore(render_finished, callbacks);
+
+        const frame_fence = try dev.createFence(&.{ .flags = .{ .signaled_bit = true } }, callbacks);
+        errdefer dev.destroyFence(frame_fence, callbacks);
+
+        return SwapImage{
+            .image = image,
+            .view = view,
+            .image_acquired = image_acquired,
+            .render_finished = render_finished,
+            .frame_fence = frame_fence,
+        };
+    }
+
+    fn deinit(self: SwapImage, dev: *const vk.DeviceProxy, callbacks: *vk.AllocationCallbacks) void {
+        self.waitForFence(dev) catch return;
+        dev.destroyImageView(self.view, callbacks);
+        dev.destroySemaphore(self.image_acquired, callbacks);
+        dev.destroySemaphore(self.render_finished, callbacks);
+        dev.destroyFence(self.frame_fence, callbacks);
+    }
+
+    fn waitForFence(self: SwapImage, dev: *const vk.DeviceProxy) !void {
+        _ = try dev.waitForFences(1, @ptrCast(&self.frame_fence), .true, std.math.maxInt(u64));
+    }
+};
+
+fn initSwapchainImages(dev: *const vk.DeviceProxy, swapchain: vk.SwapchainKHR, format: vk.Format, allocator: Allocator, callbacks: *vk.AllocationCallbacks) ![]SwapImage {
+    const images = try dev.getSwapchainImagesAllocKHR(swapchain, allocator);
+    defer allocator.free(images);
+
+    const swap_images = try allocator.alloc(SwapImage, images.len);
+    errdefer allocator.free(swap_images);
 
     var i: usize = 0;
-    errdefer for (framebuffers[0..i]) |fb| v.dev.destroyFramebuffer(fb, null);
+    errdefer for (swap_images[0..i]) |si| si.deinit(dev, callbacks);
 
-    for (framebuffers) |*fb| {
-        fb.* = try v.dev.createFramebuffer(&.{
-            .render_pass = render_pass,
-            .attachment_count = 1,
-            .p_attachments = @ptrCast(&swapchain.swap_images[i].view),
-            .width = swapchain.extent.width,
-            .height = swapchain.extent.height,
-            .layers = 1,
-        }, null);
+    for (images) |image| {
+        swap_images[i] = try SwapImage.init(dev, image, format, callbacks);
         i += 1;
     }
 
-    return framebuffers;
+    return swap_images;
 }
 
-fn destroyFramebuffers(v: *const Vulkan, allocator: Allocator, framebuffers: []const vk.Framebuffer) void {
-    for (framebuffers) |fb| v.dev.destroyFramebuffer(fb, null);
-    allocator.free(framebuffers);
+fn findSurfaceFormat(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice, surface: vk.SurfaceKHR, allocator: Allocator) !vk.SurfaceFormatKHR {
+    const preferred = vk.SurfaceFormatKHR{
+        .format = .b8g8r8a8_srgb,
+        .color_space = .srgb_nonlinear_khr,
+    };
+
+    const surface_formats = try instance.getPhysicalDeviceSurfaceFormatsAllocKHR(pdev, surface, allocator);
+    defer allocator.free(surface_formats);
+
+    for (surface_formats) |sfmt| {
+        if (std.meta.eql(sfmt, preferred)) {
+            return preferred;
+        }
+    }
+
+    return surface_formats[0]; // There must always be at least one supported surface format
 }
 
-fn createRenderPass(v: *const Vulkan, swapchain: Swapchain) !vk.RenderPass {
-    const color_attachment = vk.AttachmentDescription{
-        .format = swapchain.surface_format.format,
-        .samples = .{ .@"1_bit" = true },
-        .load_op = .clear,
-        .store_op = .store,
-        .stencil_load_op = .dont_care,
-        .stencil_store_op = .dont_care,
-        .initial_layout = .undefined,
-        .final_layout = .present_src_khr,
+fn findPresentMode(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice, surface: vk.SurfaceKHR, allocator: Allocator) !vk.PresentModeKHR {
+    const present_modes = try instance.getPhysicalDeviceSurfacePresentModesAllocKHR(pdev, surface, allocator);
+    defer allocator.free(present_modes);
+
+    const preferred = [_]vk.PresentModeKHR{
+        .mailbox_khr,
+        .immediate_khr,
     };
 
-    const color_attachment_ref = vk.AttachmentReference{
-        .attachment = 0,
-        .layout = .color_attachment_optimal,
-    };
+    for (preferred) |mode| {
+        if (std.mem.indexOfScalar(vk.PresentModeKHR, present_modes, mode) != null) {
+            return mode;
+        }
+    }
 
-    const subpass = vk.SubpassDescription{
-        .pipeline_bind_point = .graphics,
-        .color_attachment_count = 1,
-        .p_color_attachments = @ptrCast(&color_attachment_ref),
-    };
-
-    return try v.dev.createRenderPass(&.{
-        .attachment_count = 1,
-        .p_attachments = @ptrCast(&color_attachment),
-        .subpass_count = 1,
-        .p_subpasses = @ptrCast(&subpass),
-    }, null);
-}
-
-fn createPipeline(
-    v: *const Vulkan,
-    layout: vk.PipelineLayout,
-    render_pass: vk.RenderPass,
-) !vk.Pipeline {
-    const vert = try v.dev.createShaderModule(&.{
-        .code_size = vert_spv.len,
-        .p_code = @ptrCast(&vert_spv),
-    }, null);
-    defer v.dev.destroyShaderModule(vert, null);
-
-    const frag = try v.dev.createShaderModule(&.{
-        .code_size = frag_spv.len,
-        .p_code = @ptrCast(&frag_spv),
-    }, null);
-    defer v.dev.destroyShaderModule(frag, null);
-
-    const pssci = [_]vk.PipelineShaderStageCreateInfo{
-        .{
-            .stage = .{ .vertex_bit = true },
-            .module = vert,
-            .p_name = "main",
-        },
-        .{
-            .stage = .{ .fragment_bit = true },
-            .module = frag,
-            .p_name = "main",
-        },
-    };
-
-    const pvisci = vk.PipelineVertexInputStateCreateInfo{
-        .vertex_binding_description_count = 1,
-        .p_vertex_binding_descriptions = @ptrCast(&Vertex.binding_description),
-        .vertex_attribute_description_count = Vertex.attribute_description.len,
-        .p_vertex_attribute_descriptions = &Vertex.attribute_description,
-    };
-
-    const piasci = vk.PipelineInputAssemblyStateCreateInfo{
-        .topology = .triangle_list,
-        .primitive_restart_enable = .false,
-    };
-
-    const pvsci = vk.PipelineViewportStateCreateInfo{
-        .viewport_count = 1,
-        .p_viewports = undefined, // set in createCommandBuffers with cmdSetViewport
-        .scissor_count = 1,
-        .p_scissors = undefined, // set in createCommandBuffers with cmdSetScissor
-    };
-
-    const prsci = vk.PipelineRasterizationStateCreateInfo{
-        .depth_clamp_enable = .false,
-        .rasterizer_discard_enable = .false,
-        .polygon_mode = .fill,
-        .cull_mode = .{ .back_bit = true },
-        .front_face = .clockwise,
-        .depth_bias_enable = .false,
-        .depth_bias_constant_factor = 0,
-        .depth_bias_clamp = 0,
-        .depth_bias_slope_factor = 0,
-        .line_width = 1,
-    };
-
-    const pmsci = vk.PipelineMultisampleStateCreateInfo{
-        .rasterization_samples = .{ .@"1_bit" = true },
-        .sample_shading_enable = .false,
-        .min_sample_shading = 1,
-        .alpha_to_coverage_enable = .false,
-        .alpha_to_one_enable = .false,
-    };
-
-    const pcbas = vk.PipelineColorBlendAttachmentState{
-        .blend_enable = .false,
-        .src_color_blend_factor = .one,
-        .dst_color_blend_factor = .zero,
-        .color_blend_op = .add,
-        .src_alpha_blend_factor = .one,
-        .dst_alpha_blend_factor = .zero,
-        .alpha_blend_op = .add,
-        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
-    };
-
-    const pcbsci = vk.PipelineColorBlendStateCreateInfo{
-        .logic_op_enable = .false,
-        .logic_op = .copy,
-        .attachment_count = 1,
-        .p_attachments = @ptrCast(&pcbas),
-        .blend_constants = [_]f32{ 0, 0, 0, 0 },
-    };
-
-    const dynstate = [_]vk.DynamicState{ .viewport, .scissor };
-    const pdsci = vk.PipelineDynamicStateCreateInfo{
-        .flags = .{},
-        .dynamic_state_count = dynstate.len,
-        .p_dynamic_states = &dynstate,
-    };
-
-    const gpci = vk.GraphicsPipelineCreateInfo{
-        .flags = .{},
-        .stage_count = 2,
-        .p_stages = &pssci,
-        .p_vertex_input_state = &pvisci,
-        .p_input_assembly_state = &piasci,
-        .p_tessellation_state = null,
-        .p_viewport_state = &pvsci,
-        .p_rasterization_state = &prsci,
-        .p_multisample_state = &pmsci,
-        .p_depth_stencil_state = null,
-        .p_color_blend_state = &pcbsci,
-        .p_dynamic_state = &pdsci,
-        .layout = layout,
-        .render_pass = render_pass,
-        .subpass = 0,
-        .base_pipeline_handle = .null_handle,
-        .base_pipeline_index = -1,
-    };
-
-    var pipeline: vk.Pipeline = undefined;
-    _ = try v.dev.createGraphicsPipelines(
-        .null_handle,
-        1,
-        @ptrCast(&gpci),
-        null,
-        @ptrCast(&pipeline),
-    );
-    return pipeline;
+    return .fifo_khr;
 }
