@@ -97,7 +97,7 @@ pub fn main() !void {
         .pfn_user_callback = &debugUtilsMessengerCallback,
         .p_user_data = null,
     }, &vk_allocator.callbacks);
-    instance.destroyDebugUtilsMessengerEXT(debug_messenger, &vk_allocator.callbacks);
+    defer instance.destroyDebugUtilsMessengerEXT(debug_messenger, &vk_allocator.callbacks);
 
     std.debug.print("Vulkan instance created.\n", .{});
     vk_allocator.report();
@@ -145,7 +145,7 @@ pub fn main() !void {
 
     var deletor = DeletionQueue.init(allocator);
     defer deletor.deinit();
-    defer deletor.flush(&dev, &vk_allocator.callbacks);
+    defer deletor.flush(dev, &vk_allocator.callbacks);
 
     const graphics_queue = Queue.init(dev, current_candidate.?.queues.graphics_family);
     const present_queue = Queue.init(dev, current_candidate.?.queues.present_family);
@@ -155,12 +155,12 @@ pub fn main() !void {
     // ================== SwapChain ===================
 
     const format = try findSurfaceFormat(instance, pdev, surface, allocator);
-    var swapchain = try createSwapchain(&instance, &dev, pdev, surface, extent, graphics_queue, present_queue, format, allocator, &vk_allocator.callbacks, .null_handle);
+    var swapchain = try createSwapchain(instance, dev, pdev, surface, extent, graphics_queue, present_queue, format, allocator, &vk_allocator.callbacks, .null_handle);
     defer dev.destroySwapchainKHR(swapchain, &vk_allocator.callbacks);
 
-    var swap_images = try initSwapchainImages(&dev, swapchain, format.format, graphics_queue, allocator, &vk_allocator.callbacks);
+    var swap_images = try initSwapchainImages(dev, swapchain, format.format, graphics_queue, allocator, &vk_allocator.callbacks);
     defer allocator.free(swap_images);
-    defer for (swap_images) |*si| si.deinit(&dev, &vk_allocator.callbacks);
+    defer for (swap_images) |*si| si.deinit(dev, &vk_allocator.callbacks);
 
     var next_image_acquired = try dev.createSemaphore(&.{}, &vk_allocator.callbacks);
     defer dev.destroySemaphore(next_image_acquired, &vk_allocator.callbacks);
@@ -219,7 +219,7 @@ pub fn main() !void {
     init_info.Queue = @ptrFromInt(@intFromEnum(graphics_queue.handle));
     init_info.RenderPass = null;
     init_info.DescriptorPool = @ptrFromInt(@intFromEnum(descriptorPool));
-    init_info.MinImageCount = 4;
+    init_info.MinImageCount = 2;
     init_info.ImageCount = @truncate(swap_images.len);
     init_info.MSAASamples = c.c.VK_SAMPLE_COUNT_1_BIT;
     init_info.CheckVkResultFn = check_vk_result;
@@ -233,7 +233,15 @@ pub fn main() !void {
     if (!c.c.cImGui_ImplVulkan_Init(&init_info)) return error.ImGuiVulkanInitFailure;
     defer c.c.cImGui_ImplVulkan_Shutdown();
 
+    var clear_col = [4]f32{ 0.02, 0.02, 0.02, 1.0 };
+    var fps: i32 = 60;
+    var waits: i32 = 0;
+    var frame_time: f64 = 1 / @as(f64, @floatFromInt(fps));
+    var frame_start: f64 = c.c.glfwGetTime();
+    var sleep_threshold: u64 = 2_300_000;
+
     // =============== Runloop ==================
+
     var refresh_swapchain: bool = false;
     while (c.glfwWindowShouldClose(window) == 0) {
         var w: c_int = undefined;
@@ -248,9 +256,9 @@ pub fn main() !void {
 
         const im = &swap_images[frame_index];
 
-        try im.waitForFence(&dev);
+        try im.waitForFence(dev);
         try dev.resetFences(1, @ptrCast(&im.frame_fence));
-        im.deletor.flush(&dev, &vk_allocator.callbacks);
+        im.deletor.flush(dev, &vk_allocator.callbacks);
 
         try dev.resetCommandBuffer(im.cmdbuf, .{});
 
@@ -258,12 +266,12 @@ pub fn main() !void {
             .flags = .{ .one_time_submit_bit = true },
         });
 
-        try transitionImage(&dev, im.cmdbuf, im.image, .undefined, .general);
+        try transitionImage(dev, im.cmdbuf, im.image, .undefined, .general);
         dev.cmdClearColorImage(
             im.cmdbuf,
             im.image,
             .general,
-            &vk.ClearColorValue{ .float_32 = .{ 1.0, 0.8, 0.2, 1.0 } },
+            &vk.ClearColorValue{ .float_32 = clear_col },
             1,
             @ptrCast(&subresourceRange(.{ .color_bit = true })),
         );
@@ -296,19 +304,38 @@ pub fn main() !void {
             }
 
             {
-                _ = c.c.ImGui_Begin("Hello, world!", null, 0);
+                _ = c.c.ImGui_Begin("Settings", null, 0);
+                defer c.c.ImGui_End();
+                _ = c.c.ImGui_ColorEdit3("Clear Color", @ptrCast(clear_col[0..]), 0);
+
+                if (c.c.ImGui_InputInt("fps", &fps)) {
+                    frame_time = 1 / @as(f64, @floatFromInt(fps));
+                }
+            }
+
+            {
+                _ = c.c.ImGui_Begin("Performance", null, 0);
                 defer c.c.ImGui_End();
 
-                c.c.ImGui_Text("Position");
+                c.c.ImGui_Text("Time: %.3f ms/frame (%.1f FPS)", 1000.0 / io.*.Framerate, io.*.Framerate);
 
-                c.c.ImGui_Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0 / io.*.Framerate, io.*.Framerate);
-                c.c.ImGui_Text("Allocations %d", vk_allocator.alloc_count);
-                c.c.ImGui_Text("Re-Allocations %d", vk_allocator.realloc_count);
-                c.c.ImGui_Text("Frees %d", vk_allocator.free_count);
+                if (c.c.ImGui_CollapsingHeader("Allocations", 0)) {
+                    c.c.ImGui_Text(
+                        "Per-Frame: A %3d, R %3d, F %3d",
+                        vk_allocator.alloc_count,
+                        vk_allocator.realloc_count,
+                        vk_allocator.free_count,
+                    );
+                    c.c.ImGui_Text(
+                        "Total: A %3d, M %d bytes",
+                        vk_allocator.allocations.count(),
+                        vk_allocator.total_size,
+                    );
+                }
                 vk_allocator.reset_counts();
             }
         }
-        try transitionImage(&dev, im.cmdbuf, im.image, .general, .present_src_khr);
+        try transitionImage(dev, im.cmdbuf, im.image, .general, .present_src_khr);
 
         try dev.endCommandBuffer(im.cmdbuf);
 
@@ -338,29 +365,35 @@ pub fn main() !void {
             im.render_finished,
         };
 
-        _ = try dev.queuePresentKHR(present_queue.handle, &.{
+        _ = dev.queuePresentKHR(present_queue.handle, &.{
             .wait_semaphore_count = semaphores.len,
             .p_wait_semaphores = @ptrCast(&semaphores),
             .swapchain_count = 1,
             .p_swapchains = @ptrCast(&swapchain),
             .p_image_indices = @ptrCast(&frame_index),
-        });
+        }) catch |err| switch (err) {
+            error.OutOfDateKHR => {},
+            else => {
+                return err;
+            },
+        };
 
         if (refresh_swapchain) {
             refresh_swapchain = false;
             for (swap_images) |*si| {
-                si.waitForFence(&dev) catch {};
+                si.waitForFence(dev) catch {};
             }
             try dev.deviceWaitIdle();
             dev.destroySwapchainKHR(swapchain, &vk_allocator.callbacks);
-            swapchain = try createSwapchain(&instance, &dev, pdev, surface, extent, graphics_queue, present_queue, format, allocator, &vk_allocator.callbacks, .null_handle);
+            swapchain = try createSwapchain(instance, dev, pdev, surface, extent, graphics_queue, present_queue, format, allocator, &vk_allocator.callbacks, .null_handle);
 
             const images = try dev.getSwapchainImagesAllocKHR(swapchain, allocator);
             defer allocator.free(images);
             for (swap_images, images) |*si, *i| {
-                si.change_image(&dev, i.*, format.format, &vk_allocator.callbacks) catch {};
+                si.change_image(dev, i.*, format.format, &vk_allocator.callbacks) catch {};
             }
         }
+
         const result = try dev.acquireNextImageKHR(
             swapchain,
             std.math.maxInt(u64),
@@ -376,10 +409,30 @@ pub fn main() !void {
         }
 
         c.glfwPollEvents();
+        {
+            const end_time = (frame_start + frame_time);
+            var now: f64 = c.c.glfwGetTime();
+            waits = 0;
+            if (sleep_threshold == 0) sleep_threshold = 1;
+            while (end_time > now) {
+                const wait_time = @as(u64, @intFromFloat((end_time - now) * 1_000_000_000));
+                // const smaller_threshold = @divFloor(sleep_threshold, 10);
+                if (wait_time > sleep_threshold) {
+                    const sub = @min(wait_time - 1, sleep_threshold * 6);
+                    std.Thread.sleep(wait_time - sub);
+                }
+                // else if (wait_time > smaller_threshold) {
+                //     std.Thread.sleep(wait_time);
+                // }
+                now = c.c.glfwGetTime();
+                waits += 1;
+            }
+            frame_start = c.c.glfwGetTime();
+        }
     }
 
     for (swap_images) |*si| {
-        si.waitForFence(&dev) catch {};
+        si.waitForFence(dev) catch {};
     }
     try dev.deviceWaitIdle();
 
@@ -427,6 +480,7 @@ const VkAllocator = struct {
     alloc_count: usize,
     realloc_count: usize,
     free_count: usize,
+    total_size: usize,
 
     pub fn init(allocator: Allocator) !*VkAllocator {
         var self: *VkAllocator = try allocator.create(VkAllocator);
@@ -441,6 +495,7 @@ const VkAllocator = struct {
         self.alloc_count = 0;
         self.realloc_count = 0;
         self.free_count = 0;
+        self.total_size = 0;
         return self;
     }
 
@@ -467,6 +522,7 @@ const VkAllocator = struct {
             },
         };
         self.alloc_count += 1;
+        self.total_size += size;
         return @ptrCast(ret);
     }
 
@@ -491,13 +547,14 @@ const VkAllocator = struct {
     fn free(p_user_data: ?*anyopaque, ptr: ?*anyopaque) callconv(.c) void {
         const self: *VkAllocator = @ptrCast(@alignCast(p_user_data));
         const allocation = self.allocations.get(ptr) orelse {
-            std.debug.print("Freeing unknown ptr {any} in VkAllocator\n", .{ptr});
+            // std.debug.print("Freeing unknown ptr {any} in VkAllocator\n", .{ptr});
             return;
         };
         const cast_ptr: [*c]u8 = @ptrCast(ptr);
         self.allocator.rawFree(cast_ptr[0..allocation.size], allocation.alignment, @returnAddress());
         _ = self.allocations.remove(ptr);
         self.free_count += 1;
+        self.total_size -= allocation.size;
     }
 
     pub fn reset_counts(self: *VkAllocator) void {
@@ -690,8 +747,8 @@ fn checkExtensionSupport(
 // =============== SwapChain ============
 
 fn createSwapchain(
-    instance: *const vk.InstanceProxy,
-    dev: *const vk.DeviceProxy,
+    instance: vk.InstanceProxy,
+    dev: vk.DeviceProxy,
     pdev: vk.PhysicalDevice,
     surface: vk.SurfaceKHR,
     extent: vk.Extent2D,
@@ -724,7 +781,7 @@ fn createSwapchain(
     const info = vk.SwapchainCreateInfoKHR{
         .image_format = format.format,
         .image_color_space = .srgb_nonlinear_khr,
-        .present_mode = try findPresentMode(instance.*, pdev, surface, allocator),
+        .present_mode = try findPresentMode(instance, pdev, surface, allocator),
         .image_extent = actual_extent,
         .image_usage = .{ .transfer_dst_bit = true, .color_attachment_bit = true },
         .min_image_count = image_count,
@@ -763,7 +820,7 @@ const SwapImage = struct {
     cmdbuf: vk.CommandBuffer,
     deletor: DeletionQueue,
 
-    fn init(dev: *const vk.DeviceProxy, image: vk.Image, format: vk.Format, queue: Queue, allocator: Allocator, callbacks: *vk.AllocationCallbacks) !SwapImage {
+    fn init(dev: vk.DeviceProxy, image: vk.Image, format: vk.Format, queue: Queue, allocator: Allocator, callbacks: *vk.AllocationCallbacks) !SwapImage {
         const pool_info = vk.CommandPoolCreateInfo{
             .queue_family_index = queue.family,
             .flags = .{ .reset_command_buffer_bit = true },
@@ -776,7 +833,7 @@ const SwapImage = struct {
             .command_pool = pool,
             .level = .primary,
         };
-        try dev.allocateCommandBuffers(&cbuf_info, &cmdbufs);
+        try dev.allocate_command_buffers(&cbuf_info, &cmdbufs);
 
         var ret: SwapImage = undefined;
 
@@ -800,7 +857,7 @@ const SwapImage = struct {
     }
 
     /// Regenerate frame data for a new image
-    pub fn change_image(self: *SwapImage, dev: *const vk.DeviceProxy, image: vk.Image, format: vk.Format, callbacks: *vk.AllocationCallbacks) !void {
+    pub fn change_image(self: *SwapImage, dev: vk.DeviceProxy, image: vk.Image, format: vk.Format, callbacks: *vk.AllocationCallbacks) !void {
         if (self.view != .null_handle) {
             try self.deletor.queue(self.view);
         }
@@ -827,7 +884,7 @@ const SwapImage = struct {
         try self.deletor.queue(self.view);
     }
 
-    fn deinit(self: *SwapImage, dev: *const vk.DeviceProxy, callbacks: *vk.AllocationCallbacks) void {
+    fn deinit(self: *SwapImage, dev: vk.DeviceProxy, callbacks: *vk.AllocationCallbacks) void {
         self.waitForFence(dev) catch return;
         _ = self.queue_frame_delete() catch unreachable;
         self.deletor.flush(dev, callbacks);
@@ -838,12 +895,12 @@ const SwapImage = struct {
         dev.destroyCommandPool(self.pool, callbacks);
     }
 
-    fn waitForFence(self: *SwapImage, dev: *const vk.DeviceProxy) !void {
+    fn waitForFence(self: *SwapImage, dev: vk.DeviceProxy) !void {
         _ = try dev.waitForFences(1, @ptrCast(&self.frame_fence), .true, std.math.maxInt(u64));
     }
 };
 
-fn initSwapchainImages(dev: *const vk.DeviceProxy, swapchain: vk.SwapchainKHR, format: vk.Format, queue: Queue, allocator: Allocator, callbacks: *vk.AllocationCallbacks) ![]SwapImage {
+fn initSwapchainImages(dev: vk.DeviceProxy, swapchain: vk.SwapchainKHR, format: vk.Format, queue: Queue, allocator: Allocator, callbacks: *vk.AllocationCallbacks) ![]SwapImage {
     const images = try dev.getSwapchainImagesAllocKHR(swapchain, allocator);
     defer allocator.free(images);
 
@@ -899,7 +956,7 @@ fn findPresentMode(instance: vk.InstanceProxy, pdev: vk.PhysicalDevice, surface:
 
 // ==================== Dynamic Rendering =================
 
-fn transitionImage(dev: *const vk.DeviceProxy, cmd: vk.CommandBuffer, image: vk.Image, current_layout: vk.ImageLayout, new_layout: vk.ImageLayout) !void {
+fn transitionImage(dev: vk.DeviceProxy, cmd: vk.CommandBuffer, image: vk.Image, current_layout: vk.ImageLayout, new_layout: vk.ImageLayout) !void {
     const image_memory_barriers = [_]vk.ImageMemoryBarrier2{
         .{
             .image = image,
@@ -986,7 +1043,7 @@ const DeletionQueue = struct {
     }
 
     /// Flush deletion queue, queues retain their maximum capacity for performance reasons.
-    pub fn flush(self: *DeletionQueue, dev: *const vk.DeviceProxy, callbacks: *vk.AllocationCallbacks) void {
+    pub fn flush(self: *DeletionQueue, dev: vk.DeviceProxy, callbacks: *vk.AllocationCallbacks) void {
         for (self.buffers.items) |b| dev.destroyBuffer(b, callbacks);
         self.buffers.clearRetainingCapacity();
         for (self.fences.items) |f| dev.destroyFence(f, callbacks);
