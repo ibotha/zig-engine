@@ -7,7 +7,6 @@ const Renderer = cimgui.Renderer;
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const use_zig_shaders = b.option(bool, "zig-shader", "Use Zig shaders instead of GLSL") orelse false;
 
     var exe: *std.Build.Step.Compile = undefined;
     var cimgui_dep: *std.Build.Dependency = undefined;
@@ -40,15 +39,6 @@ pub fn build(b: *std.Build) !void {
         }),
     });
 
-    exe.addCSourceFiles(.{
-        .files = &.{"external/vk_mem_alloc/src.cpp"},
-        .flags = &.{
-            "-std=c++17",
-        },
-    });
-
-    exe.addIncludePath(b.path("external/include"));
-
     cimgui_dep = b.dependency("cimgui_zig", .{
         .target = target,
         .optimize = optimize,
@@ -59,62 +49,27 @@ pub fn build(b: *std.Build) !void {
 
     exe.linkLibrary(cimgui_dep.artifact("cimgui"));
 
-    if (use_zig_shaders) {
-        const spirv_target = b.resolveTargetQuery(.{
-            .cpu_arch = .spirv32,
-            .os_tag = .vulkan,
-            .cpu_model = .{ .explicit = &std.Target.spirv.cpu.vulkan_v1_2 },
-            .ofmt = .spirv,
-        });
+    const vert_cmd = b.addSystemCommand(&.{
+        "glslc",
+        "--target-env=vulkan1.2",
+        "-o",
+    });
+    const vert_spv = vert_cmd.addOutputFileArg("vert.spv");
+    vert_cmd.addFileArg(b.path("src/shaders/triangle.vert"));
+    exe.root_module.addAnonymousImport("vertex_shader", .{
+        .root_source_file = vert_spv,
+    });
 
-        const vert_spv = b.addObject(.{
-            .name = "vertex_shader",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/shaders/vertex.zig"),
-                .target = spirv_target,
-            }),
-            .use_llvm = false,
-        });
-        exe.root_module.addAnonymousImport(
-            "vertex_shader",
-            .{ .root_source_file = vert_spv.getEmittedBin() },
-        );
-
-        const frag_spv = b.addObject(.{
-            .name = "fragment_shader",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/shaders/fragment.zig"),
-                .target = spirv_target,
-            }),
-            .use_llvm = false,
-        });
-        exe.root_module.addAnonymousImport(
-            "fragment_shader",
-            .{ .root_source_file = frag_spv.getEmittedBin() },
-        );
-    } else {
-        const vert_cmd = b.addSystemCommand(&.{
-            "glslc",
-            "--target-env=vulkan1.2",
-            "-o",
-        });
-        const vert_spv = vert_cmd.addOutputFileArg("vert.spv");
-        vert_cmd.addFileArg(b.path("src/shaders/triangle.vert"));
-        exe.root_module.addAnonymousImport("vertex_shader", .{
-            .root_source_file = vert_spv,
-        });
-
-        const frag_cmd = b.addSystemCommand(&.{
-            "glslc",
-            "--target-env=vulkan1.2",
-            "-o",
-        });
-        const frag_spv = frag_cmd.addOutputFileArg("frag.spv");
-        frag_cmd.addFileArg(b.path("src/shaders/triangle.frag"));
-        exe.root_module.addAnonymousImport("fragment_shader", .{
-            .root_source_file = frag_spv,
-        });
-    }
+    const frag_cmd = b.addSystemCommand(&.{
+        "glslc",
+        "--target-env=vulkan1.2",
+        "-o",
+    });
+    const frag_spv = frag_cmd.addOutputFileArg("frag.spv");
+    frag_cmd.addFileArg(b.path("src/shaders/triangle.frag"));
+    exe.root_module.addAnonymousImport("fragment_shader", .{
+        .root_source_file = frag_spv,
+    });
 
     b.installArtifact(exe);
     const run_step = b.step("run", "Run the app");
