@@ -17,14 +17,16 @@ fn update(delta: f64) void {
     if (input.wasButtonPressed(.esc)) {
         app.quit();
     }
-    if (input.wasButtonReleased(.space)) {
-        std.log.info("Space just released", .{});
-    }
     _ = delta;
 }
 
 fn render(delta: f64) void {
-    core.renderer.clear(.{ .x = @floatCast(delta), .y = 0, .z = 0, .w = 0 });
+    core.renderer.clear(.{
+        .x = @floatCast(delta),
+        .y = 0,
+        .z = if (input.justScrolled()) 1 else 0,
+        .w = 1,
+    });
 }
 
 fn deinit() void {

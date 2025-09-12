@@ -12,6 +12,11 @@ fn onClose(_: ?*anyopaque, _: event.Event, _: ?*anyopaque) bool {
     app_state.exec_state = .shutdown;
     return true;
 }
+fn onResize(_: ?*anyopaque, ev: event.Event, _: ?*anyopaque) bool {
+    if (app_state.exec_state == .shutdown) return false;
+    app_state.exec_state = if (ev.resize.x == 0 or ev.resize.y == 0) .suspended else .running;
+    return false;
+}
 
 pub const AppUpdateError = error{Crash};
 pub const AppInitError = error{BadInit};
@@ -50,11 +55,14 @@ pub const App = struct {
         });
         try input.init();
         try event.listen(.closed, null, onClose);
+        try event.listen(.resize, null, onResize);
         // app_state.width = @intCast(app_state.platform.window.configured_width);
         // app_state.height = @intCast(app_state.platform.window.configured_height);
         app_state.exec_state = .running;
         app_state.app_timer.reset();
         try cfg.app_init();
+        std.log.debug("Initialised", .{});
+        memory.report();
     }
 
     pub fn run(app: *App) !void {
@@ -66,26 +74,34 @@ pub const App = struct {
         var frame_timer = Timer{};
         var current_frame: u64 = 0;
         var frame_times = [_]struct { total: f64 = 0, working: f64 = 0 }{.{}} ** 30;
-        while (app_state.exec_state == .running) {
+        runloop: while (true) {
             // Frame time tracking
+            try platform.poll_events();
             app_state.app_timer.update();
             frame_timer.update();
             const delta_time = frame_timer.elapsed;
             frame_timer.reset();
             frame_times[current_frame % frame_times.len].total = delta_time;
+            switch (app_state.exec_state) {
+                .running => {
 
-            // Update various systems
-            app.app_update(delta_time);
-            input.update(delta_time);
-            try platform.poll_events();
+                    // Update various systems
+                    app.app_update(delta_time);
+                    input.update(delta_time);
 
-            // TODO: instrument the various stages of frame computation
-            // Render point
-            try renderer.startFrame();
-            renderer.clear(app_state.clear_color);
-            app.app_render(delta_time);
-            try renderer.endFrame();
-
+                    // TODO: instrument the various stages of frame computation
+                    // Render point
+                    try renderer.startFrame();
+                    renderer.clear(app_state.clear_color);
+                    app.app_render(delta_time);
+                    try renderer.endFrame();
+                },
+                .shutdown => {
+                    break :runloop;
+                },
+                .suspended => {},
+                else => {},
+            }
             // Mark the working time of the frame
             current_frame += 1;
             frame_timer.update();
@@ -145,7 +161,7 @@ pub fn setFPS(fps: u32) void {
     app_state.desired_frame_time = 1.0 / @as(f64, @floatFromInt(fps));
 }
 pub fn quit() void {
-    app_state.exec_state = .shutdown;
+    _ = event.fire(.closed, null);
 }
 
 fn deinit() void {
@@ -156,8 +172,8 @@ fn deinit() void {
     input.deinit();
     renderer.deinit();
     platform.deinit();
-    std.log.debug("App ran for {d}s\n", .{app_state.app_timer.elapsed});
     event.deinit();
     memory.report();
     memory.deinit();
+    std.log.debug("App ran for {d}s", .{app_state.app_timer.elapsed});
 }

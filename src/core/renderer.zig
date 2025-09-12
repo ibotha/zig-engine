@@ -9,7 +9,7 @@ pub const RendererOpts = struct { name: []const u8, size_hint: mu16.Vec2 };
 
 fn onResize(_: ?*anyopaque, ev: event.Event, _: ?*anyopaque) bool {
     backend.resize(ev.resize);
-    return true;
+    return false;
 }
 
 pub fn init(opts: RendererOpts) !void {

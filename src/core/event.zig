@@ -1,4 +1,6 @@
-const zlm = @import("zlm").as(u16);
+const zlm = @import("zlm");
+const mu16 = @import("zlm").as(u16);
+const mi32 = @import("zlm").as(i32);
 const tagged_allocator = @import("memory.zig").tagged_allocator;
 const std = @import("std");
 
@@ -63,9 +65,9 @@ pub const EventType = enum(u3) {
 };
 
 pub const Event = union(EventType) {
-    mouse_moved: zlm.Vec2,
-    mouse_scroll: zlm.Vec2,
-    resize: zlm.Vec2,
+    mouse_moved: mi32.Vec2,
+    mouse_scroll: mi32.Vec2,
+    resize: mu16.Vec2,
     button: struct { button: Button, pressed: bool },
     closed: void,
 };

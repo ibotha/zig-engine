@@ -72,6 +72,8 @@ fn frameConfigure(frame: ?*c.struct_libdecor_frame, config: ?*c.struct_libdecor_
 
     width = if (width == 0) @intCast(window.floating_width) else width;
     height = if (height == 0) @intCast(window.floating_height) else height;
+    width = @max(width, 0);
+    height = @max(height, 0);
 
     window.configured_width = @intCast(width);
     window.configured_height = @intCast(height);
@@ -90,10 +92,18 @@ fn frameConfigure(frame: ?*c.struct_libdecor_frame, config: ?*c.struct_libdecor_
         window.floating_width = @intCast(width);
         window.floating_height = @intCast(height);
     }
-    last_resize_event = .{ .resize = .{
-        .x = @intCast(width),
-        .y = @intCast(height),
-    } };
+
+    if (window_state == c.LIBDECOR_WINDOW_STATE_SUSPENDED) {
+        last_resize_event = .{ .resize = .{
+            .x = 0,
+            .y = 0,
+        } };
+    } else {
+        last_resize_event = .{ .resize = .{
+            .x = @intCast(width),
+            .y = @intCast(height),
+        } };
+    }
     resize_cooldown.reset();
 }
 
