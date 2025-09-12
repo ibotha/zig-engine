@@ -23,6 +23,10 @@ pub const GraphicsContextOpts = struct {
     start_height: u16,
 };
 
+fn loadVkFunc(T: type, name: []const u8) T {
+    return gc.libvk.lookup(T, name);
+}
+
 var gc: GraphicsContext = undefined;
 
 pub fn init(opts: GraphicsContextOpts) !void {
@@ -153,6 +157,8 @@ fn refresh_swapchain() !void {
 
 const GraphicsContext = struct {
     allocator: Allocator,
+    libvk: std.DynLib,
+    load_fn: vk.PfnGetInstanceProcAddr = undefined,
     render_size: vk.Extent2D = .{ .width = 0, .height = 0 },
     vkb: *vk.BaseWrapper = undefined,
     vki: *vk.InstanceWrapper = undefined,
@@ -181,16 +187,35 @@ const GraphicsContext = struct {
 
     pub fn init(opts: GraphicsContextOpts) !GraphicsContext {
         const allocator = core.tagged_allocator(.graphics_context);
-        _ = c.glfwSetErrorCallback(glfw_error_callback);
-        if (c.glfwInit() == 0) return error.glfwInitFailure;
-        var ret = GraphicsContext{ .render_size = .{
-            .width = opts.start_width,
-            .height = opts.start_height,
-        }, .allocator = allocator };
-        try vk_alloc.init();
 
+        var ret = GraphicsContext{
+            .render_size = .{
+                .width = opts.start_width,
+                .height = opts.start_height,
+            },
+            .allocator = allocator,
+            // TODO: Select libvulkan properly based on platform
+            // https://github.com/glfw/glfw/blob/master/src/vulkan.c#L56C1-L68C7
+            //
+            // #if defined(_GLFW_VULKAN_LIBRARY)
+            //         _glfw.vk.handle = _glfwPlatformLoadModule(_GLFW_VULKAN_LIBRARY);
+            // #elif defined(_GLFW_WIN32)
+            //         _glfw.vk.handle = _glfwPlatformLoadModule("vulkan-1.dll");
+            // #elif defined(_GLFW_COCOA)
+            //         _glfw.vk.handle = _glfwPlatformLoadModule("libvulkan.1.dylib");
+            //         if (!_glfw.vk.handle)
+            //             _glfw.vk.handle = _glfwLoadLocalVulkanLoaderCocoa();
+            // #elif defined(__OpenBSD__) || defined(__NetBSD__)
+            //         _glfw.vk.handle = _glfwPlatformLoadModule("libvulkan.so");
+            // #else
+            //         _glfw.vk.handle = _glfwPlatformLoadModule("libvulkan.so.1");
+            // #endif
+            .libvk = try std.DynLib.open("libvulkan.so"),
+        };
+        try vk_alloc.init();
+        ret.load_fn = ret.libvk.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr").?;
         ret.vkb = try allocator.create(vk.BaseWrapper);
-        ret.vkb.* = vk.BaseWrapper.load(c.glfwGetInstanceProcAddress);
+        ret.vkb.* = vk.BaseWrapper.load(ret.load_fn);
 
         var extension_names: std.ArrayList([*:0]const u8) = .empty;
         defer extension_names.deinit(allocator);
@@ -324,7 +349,6 @@ const GraphicsContext = struct {
         self.allocator.destroy(self.vki);
         self.allocator.destroy(self.vkb);
         vk_alloc.deinit();
-        c.glfwTerminate();
     }
 
     fn createSwapchain(
