@@ -1,7 +1,10 @@
-const app = @import("core").app;
+const App = @import("core").app.App;
 
 pub fn main() !void {
-    try app.init("Test App", 1080, 720);
+    var app = App{
+        .name = "Test App",
+    };
+    try app.init();
 
     try app.run();
 }

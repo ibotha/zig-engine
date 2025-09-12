@@ -118,7 +118,6 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "core", .module = core },
-            .{ .name = "renderer_backend", .module = renderer_backend },
         },
         .root_source_file = b.path("src/platform/linux.zig"),
     });
@@ -126,6 +125,7 @@ pub fn build(b: *std.Build) !void {
     try linkWayland(b, platform);
 
     core.addImport("platform", platform);
+    core.addImport("renderer_backend", renderer_backend);
     renderer_backend.addImport("platform", platform);
 
     const test_bed = b.addExecutable(.{

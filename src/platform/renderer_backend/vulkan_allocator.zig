@@ -1,5 +1,6 @@
 const std = @import("std");
 const vk = @import("vulkan");
+const core = @import("core");
 
 const mem = std.mem;
 const Allocator = mem.Allocator;
@@ -29,13 +30,12 @@ var state = VkAllocator{};
 
 pub const callbacks = &state.callbacks;
 
-pub fn init(allocator: Allocator) !void {
-    state.allocator = allocator;
-    state.allocations = .init(allocator);
+pub fn init() !void {
+    state.allocator = core.tagged_allocator(.graphics_context);
+    state.allocations = .init(state.allocator);
 }
 
 pub fn deinit() void {
-    report();
     state.allocations.clearAndFree();
 }
 

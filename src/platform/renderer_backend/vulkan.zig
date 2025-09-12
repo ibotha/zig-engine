@@ -1,6 +1,7 @@
 const std = @import("std");
 const vk = @import("vulkan");
 const platform = @import("platform");
+const core = @import("core");
 
 const c = @import("c.zig");
 const vk_alloc = @import("vulkan_allocator.zig");
@@ -23,8 +24,8 @@ pub const GraphicsContextOpts = struct {
 
 var gc: GraphicsContext = undefined;
 
-pub fn init(allocator: Allocator, opts: GraphicsContextOpts) !void {
-    gc = try GraphicsContext.init(allocator, opts);
+pub fn init(opts: GraphicsContextOpts) !void {
+    gc = try GraphicsContext.init(opts);
 }
 
 pub fn deinit() void {
@@ -178,14 +179,15 @@ const GraphicsContext = struct {
         std.debug.print("GLFW Error {d}: {s}\n", .{ err, description });
     }
 
-    pub fn init(allocator: Allocator, opts: GraphicsContextOpts) !GraphicsContext {
+    pub fn init(opts: GraphicsContextOpts) !GraphicsContext {
+        const allocator = core.tagged_allocator(.graphics_context);
         _ = c.glfwSetErrorCallback(glfw_error_callback);
         if (c.glfwInit() == 0) return error.glfwInitFailure;
         var ret = GraphicsContext{ .render_size = .{
             .width = opts.start_width,
             .height = opts.start_height,
         }, .allocator = allocator };
-        try vk_alloc.init(allocator);
+        try vk_alloc.init();
 
         ret.vkb = try allocator.create(vk.BaseWrapper);
         ret.vkb.* = vk.BaseWrapper.load(c.glfwGetInstanceProcAddress);

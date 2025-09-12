@@ -3,15 +3,18 @@ const c = @cImport({
     @cInclude("linux/input-event-codes.h");
     @cInclude("libdecor-0/libdecor.h");
     @cInclude("wayland-cursor.h");
+    @cInclude("sys/time.h");
+    @cInclude("unistd.h");
 });
+
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const posix = std.posix;
 
 const core = @import("core");
+const event = core.event;
 const common = @import("common.zig");
 const wayland = @import("wayland");
-const render_backend = @import("renderer_backend");
 // TODO: WTF is a wl?
 const wl = wayland.client.wl;
 // TODO: WTF is a xdg?
@@ -48,7 +51,6 @@ const Window = struct {
     configured_width: u16 = 0,
     configured_height: u16 = 0,
     window_state: c.enum_libdecor_window_state = c.LIBDECOR_WINDOW_STATE_NONE,
-    want_close: bool = false,
     surface: *wl.Surface = undefined,
     ldecor: *c.struct_libdecor = undefined,
     frame: *c.struct_libdecor_frame = undefined,
@@ -88,7 +90,7 @@ fn frameConfigure(frame: ?*c.struct_libdecor_frame, config: ?*c.struct_libdecor_
 }
 
 fn frameClose(_: ?*c.struct_libdecor_frame, _: ?*anyopaque) callconv(.c) void {
-    window.want_close = true;
+    event.fire(.closed, null);
 }
 
 fn frameCommit(_: ?*c.struct_libdecor_frame, _: ?*anyopaque) callconv(.c) void {
@@ -108,12 +110,15 @@ const Input = struct {
         x: i32 = 0,
         y: i32 = 0,
     } = .{},
+    key_state: struct {
+        entered: bool = false,
+    } = .{},
 };
 var window = Window{};
 var context = WaylandContext{};
 var input = Input{};
 
-pub fn init(allocator: Allocator, opts: common.PlatformOpts) !void {
+pub fn init(opts: common.PlatformOpts) !void {
     context.display = try wl.Display.connect(null);
     context.registry = try context.display.getRegistry();
     context.registry.setListener(?*anyopaque, eventListener, null);
@@ -145,19 +150,10 @@ pub fn init(allocator: Allocator, opts: common.PlatformOpts) !void {
     c.libdecor_frame_set_title(window.frame, @ptrCast(opts.name));
     c.libdecor_frame_map(window.frame);
 
-    window.want_close = false;
-
     if (context.display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
-
-    try render_backend.init(allocator, .{
-        .name = opts.name,
-        .start_width = opts.size_hint.x,
-        .start_height = opts.size_hint.y,
-    });
 }
 
 pub fn deinit() void {
-    render_backend.deinit();
     c.libdecor_frame_close(window.frame);
     context.cursor.destroy();
     window.surface.destroy();
@@ -169,18 +165,6 @@ pub fn poll_events() !void {
     if (c.libdecor_dispatch(window.ldecor, 0) < 0) {
         // @panic("Wayland event dispatch didn't return SUCCESS");
     }
-    try render_backend.startFrame();
-    render_backend.clear(.{
-        @as(f32, @floatFromInt(input.mouse_state.x)) / @as(f32, @floatFromInt(window.configured_width)),
-        @as(f32, @floatFromInt(input.mouse_state.y)) / @as(f32, @floatFromInt(window.configured_height)),
-        0,
-        1,
-    });
-    try render_backend.endFrame();
-}
-
-pub fn want_close() bool {
-    return window.want_close;
 }
 
 pub fn get_surface() *anyopaque {
@@ -214,12 +198,12 @@ fn eventListener(registry: *wl.Registry, e: wl.Registry.Event, _: ?*anyopaque) v
     }
 }
 
-fn handleShellPing(shell: *xdg.WmBase, event: xdg.WmBase.Event, _: ?*anyopaque) void {
-    shell.pong(event.ping.serial);
+fn handleShellPing(shell: *xdg.WmBase, e: xdg.WmBase.Event, _: ?*anyopaque) void {
+    shell.pong(e.ping.serial);
 }
 
-fn handleSeatEvent(seat: *wl.Seat, event: wl.Seat.Event, _: ?*anyopaque) void {
-    switch (event) {
+fn handleSeatEvent(seat: *wl.Seat, ev: wl.Seat.Event, _: ?*anyopaque) void {
+    switch (ev) {
         .capabilities => |e| {
             if (e.capabilities.keyboard) {
                 input.kbd = seat.getKeyboard() catch return;
@@ -232,18 +216,89 @@ fn handleSeatEvent(seat: *wl.Seat, event: wl.Seat.Event, _: ?*anyopaque) void {
         },
     }
 }
-fn handleKeyboardEvent(kbd: *wl.Keyboard, event: wl.Keyboard.Event, _: ?*anyopaque) void {
+fn handleKeyboardEvent(kbd: *wl.Keyboard, ev: wl.Keyboard.Event, _: ?*anyopaque) void {
+    switch (ev) {
+        .enter => |e| {
+            if (e.surface == window.surface) {
+                input.key_state.entered = true;
+            }
+        },
+        .leave => |e| {
+            if (e.surface == window.surface) {
+                input.key_state.entered = false;
+            }
+        },
+        .keymap => |e| {
+            _ = e;
+        },
+        .modifiers => |e| {
+            _ = e;
+        },
+        .key => |e| {
+            if (input.key_state.entered) {
+                event.fire(.{ .key = .{
+                    .key = btn_tag: switch (e.key) {
+                        c.KEY_0 => break :btn_tag .num_0,
+                        c.KEY_1 => break :btn_tag .num_1,
+                        c.KEY_2 => break :btn_tag .num_2,
+                        c.KEY_3 => break :btn_tag .num_3,
+                        c.KEY_4 => break :btn_tag .num_4,
+                        c.KEY_5 => break :btn_tag .num_5,
+                        c.KEY_6 => break :btn_tag .num_6,
+                        c.KEY_7 => break :btn_tag .num_7,
+                        c.KEY_8 => break :btn_tag .num_8,
+                        c.KEY_9 => break :btn_tag .num_9,
+                        c.KEY_A => break :btn_tag .a,
+                        c.KEY_B => break :btn_tag .b,
+                        c.KEY_C => break :btn_tag .c,
+                        c.KEY_D => break :btn_tag .d,
+                        c.KEY_E => break :btn_tag .e,
+                        c.KEY_F => break :btn_tag .f,
+                        c.KEY_G => break :btn_tag .g,
+                        c.KEY_H => break :btn_tag .h,
+                        c.KEY_I => break :btn_tag .i,
+                        c.KEY_J => break :btn_tag .j,
+                        c.KEY_K => break :btn_tag .k,
+                        c.KEY_L => break :btn_tag .l,
+                        c.KEY_M => break :btn_tag .m,
+                        c.KEY_N => break :btn_tag .n,
+                        c.KEY_O => break :btn_tag .o,
+                        c.KEY_P => break :btn_tag .p,
+                        c.KEY_Q => break :btn_tag .q,
+                        c.KEY_R => break :btn_tag .r,
+                        c.KEY_S => break :btn_tag .s,
+                        c.KEY_T => break :btn_tag .t,
+                        c.KEY_U => break :btn_tag .u,
+                        c.KEY_V => break :btn_tag .v,
+                        c.KEY_W => break :btn_tag .w,
+                        c.KEY_X => break :btn_tag .x,
+                        c.KEY_Y => break :btn_tag .y,
+                        c.KEY_Z => break :btn_tag .z,
+                        c.KEY_UP => break :btn_tag .up,
+                        c.KEY_DOWN => break :btn_tag .down,
+                        c.KEY_LEFT => break :btn_tag .left,
+                        c.KEY_RIGHT => break :btn_tag .right,
+                        else => .unknown,
+                    },
+                    .pressed = e.state == .pressed,
+                } }, null);
+            }
+        },
+    }
     _ = kbd;
-    _ = event;
 }
 
-fn handleMouseEvent(_: *wl.Pointer, event: wl.Pointer.Event, _: ?*anyopaque) void {
-    switch (event) {
+fn handleMouseEvent(_: *wl.Pointer, ev: wl.Pointer.Event, _: ?*anyopaque) void {
+    switch (ev) {
         .axis => |e| {
             switch (e.axis) {
-                .vertical_scroll => {},
-                .horizontal_scroll => {},
-                _ => {},
+                .vertical_scroll => {
+                    event.fire(.{ .mouse_scroll = .{ .y = @intCast(e.value.toInt()), .x = 0 } }, null);
+                },
+                .horizontal_scroll => {
+                    event.fire(.{ .mouse_scroll = .{ .x = @intCast(e.value.toInt()), .y = 0 } }, null);
+                },
+                _ => unreachable,
             }
         },
         .enter => |e| {
@@ -260,25 +315,42 @@ fn handleMouseEvent(_: *wl.Pointer, event: wl.Pointer.Event, _: ?*anyopaque) voi
             }
         },
         .motion => |e| {
-            input.mouse_state.x = e.surface_x.toInt();
-            input.mouse_state.y = e.surface_y.toInt();
+            if (input.mouse_state.entered) {
+                event.fire(.{
+                    .mouse_moved = .{
+                        .x = @intCast(e.surface_x.toInt()),
+                        .y = @intCast(e.surface_y.toInt()),
+                    },
+                }, null);
+                input.mouse_state.x = e.surface_x.toInt();
+                input.mouse_state.y = e.surface_y.toInt();
+            }
         },
         .button => |e| {
             if (input.mouse_state.entered) {
-                std.debug.print("Button pressed {any}\n", .{e});
-                if (e.button == c.BTN_RIGHT and e.state == .pressed) c.libdecor_frame_show_window_menu(
-                    window.frame,
-                    @ptrCast(input.seat),
-                    e.serial,
-                    input.mouse_state.x,
-                    input.mouse_state.y,
-                );
+                event.fire(.{ .mouse_button = .{
+                    .button = btn_tag: switch (e.button) {
+                        c.BTN_RIGHT => break :btn_tag .right,
+                        c.BTN_LEFT => break :btn_tag .left,
+                        c.BTN_MIDDLE => break :btn_tag .middle,
+                        else => break :btn_tag .unknown,
+                    },
+                    .pressed = e.state == .pressed,
+                } }, null);
             }
-            // if (e.button == c.BTN_RIGHT and e.state == .pressed) context.xdg_toplevel.showWindowMenu(context.seat, e.serial, context.mouse_state.x, context.mouse_state.y);
         },
     }
 }
 
 fn handleError(ldecor: ?*c.struct_libdecor, err: c.enum_libdecor_error, str: [*c]const u8) callconv(.c) void {
     std.debug.print("{s} {any} {any}", .{ str, ldecor, err });
+}
+
+/// Get absolute time in seconds
+pub fn get_absolute_time() i128 {
+    return std.time.nanoTimestamp();
+}
+
+pub fn sleep(s: f64) void {
+    std.Thread.sleep(@intFromFloat(s * 1000000000));
 }
