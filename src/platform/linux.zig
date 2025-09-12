@@ -98,7 +98,7 @@ fn frameConfigure(frame: ?*c.struct_libdecor_frame, config: ?*c.struct_libdecor_
 }
 
 fn frameClose(_: ?*c.struct_libdecor_frame, _: ?*anyopaque) callconv(.c) void {
-    event.fire(.closed, null);
+    _ = event.fire(.closed, null);
 }
 
 fn frameCommit(_: ?*c.struct_libdecor_frame, _: ?*anyopaque) callconv(.c) void {
@@ -173,7 +173,7 @@ pub fn deinit() void {
 pub fn poll_events() !void {
     resize_cooldown.update();
     if (resize_cooldown.elapsed > 0.1 and last_resize_event != null) {
-        event.fire(last_resize_event.?, null);
+        _ = event.fire(last_resize_event.?, null);
         last_resize_event = null;
     }
     if (c.libdecor_dispatch(window.ldecor, 0) < 0) {
@@ -246,8 +246,8 @@ fn handleKeyboardEvent(kbd: *wl.Keyboard, ev: wl.Keyboard.Event, _: ?*anyopaque)
         },
         .key => |e| {
             if (input.key_state.entered) {
-                event.fire(.{ .key = .{
-                    .key = btn_tag: switch (e.key) {
+                _ = event.fire(.{ .button = .{
+                    .button = btn_tag: switch (e.key) {
                         c.KEY_0 => break :btn_tag .num_0,
                         c.KEY_1 => break :btn_tag .num_1,
                         c.KEY_2 => break :btn_tag .num_2,
@@ -289,6 +289,7 @@ fn handleKeyboardEvent(kbd: *wl.Keyboard, ev: wl.Keyboard.Event, _: ?*anyopaque)
                         c.KEY_LEFT => break :btn_tag .left,
                         c.KEY_RIGHT => break :btn_tag .right,
                         c.KEY_ESC => break :btn_tag .esc,
+                        c.KEY_SPACE => break :btn_tag .space,
                         else => .unknown,
                     },
                     .pressed = e.state == .pressed,
@@ -304,10 +305,10 @@ fn handleMouseEvent(_: *wl.Pointer, ev: wl.Pointer.Event, _: ?*anyopaque) void {
         .axis => |e| {
             switch (e.axis) {
                 .vertical_scroll => {
-                    event.fire(.{ .mouse_scroll = .{ .y = @intCast(e.value.toInt()), .x = 0 } }, null);
+                    _ = event.fire(.{ .mouse_scroll = .{ .y = @intCast(e.value.toInt()), .x = 0 } }, null);
                 },
                 .horizontal_scroll => {
-                    event.fire(.{ .mouse_scroll = .{ .x = @intCast(e.value.toInt()), .y = 0 } }, null);
+                    _ = event.fire(.{ .mouse_scroll = .{ .x = @intCast(e.value.toInt()), .y = 0 } }, null);
                 },
                 _ => unreachable,
             }
@@ -327,7 +328,7 @@ fn handleMouseEvent(_: *wl.Pointer, ev: wl.Pointer.Event, _: ?*anyopaque) void {
         },
         .motion => |e| {
             if (input.mouse_state.entered) {
-                event.fire(.{
+                _ = event.fire(.{
                     .mouse_moved = .{
                         .x = @intCast(e.surface_x.toInt()),
                         .y = @intCast(e.surface_y.toInt()),
@@ -339,11 +340,11 @@ fn handleMouseEvent(_: *wl.Pointer, ev: wl.Pointer.Event, _: ?*anyopaque) void {
         },
         .button => |e| {
             if (input.mouse_state.entered) {
-                event.fire(.{ .mouse_button = .{
+                _ = event.fire(.{ .button = .{
                     .button = btn_tag: switch (e.button) {
-                        c.BTN_RIGHT => break :btn_tag .right,
-                        c.BTN_LEFT => break :btn_tag .left,
-                        c.BTN_MIDDLE => break :btn_tag .middle,
+                        c.BTN_RIGHT => break :btn_tag .mouse_right,
+                        c.BTN_LEFT => break :btn_tag .mouse_left,
+                        c.BTN_MIDDLE => break :btn_tag .mouse_middle,
                         else => break :btn_tag .unknown,
                     },
                     .pressed = e.state == .pressed,

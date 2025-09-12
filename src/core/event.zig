@@ -2,13 +2,10 @@ const zlm = @import("zlm").as(u16);
 const tagged_allocator = @import("memory.zig").tagged_allocator;
 const std = @import("std");
 
-pub const MouseButton = enum(u2) {
-    left,
-    right,
-    middle,
-    unknown,
-};
-pub const Key = enum(u8) {
+pub const Button = enum(u8) {
+    mouse_left,
+    mouse_right,
+    mouse_middle,
     a,
     b,
     c,
@@ -61,8 +58,7 @@ pub const EventType = enum(u3) {
     mouse_moved,
     mouse_scroll,
     resize,
-    mouse_button,
-    key,
+    button,
     closed,
 };
 
@@ -70,8 +66,7 @@ pub const Event = union(EventType) {
     mouse_moved: zlm.Vec2,
     mouse_scroll: zlm.Vec2,
     resize: zlm.Vec2,
-    mouse_button: struct { button: MouseButton, pressed: bool },
-    key: struct { key: Key, pressed: bool },
+    button: struct { button: Button, pressed: bool },
     closed: void,
 };
 
@@ -100,10 +95,17 @@ pub fn listen(etype: EventType, listener: ?*anyopaque, fun: EventFn) !void {
     try registrations[@intFromEnum(etype)].append(allocator, .{ .callback = fun, .listener = listener });
 }
 pub fn unlisten(etype: EventType, listener: ?*anyopaque, fun: EventFn) void {
-    registrations[@intFromEnum(etype)].swapRemove(std.mem.indexOfScalar(Registration, registrations[@intFromEnum(etype)], .{ .callback = fun, .listener = listener }));
+    const index = for (registrations[@intFromEnum(etype)].items, 0..) |*r, i| {
+        if (r.listener == listener and r.callback == fun) break i;
+    } else {
+        return;
+    };
+
+    _ = registrations[@intFromEnum(etype)].swapRemove(index);
 }
-pub fn fire(event: Event, sender: ?*anyopaque) void {
+pub fn fire(event: Event, sender: ?*anyopaque) bool {
     for (registrations[@intFromEnum(event)].items) |r| {
-        _ = r.callback(r.listener, event, sender);
+        if (r.callback(r.listener, event, sender)) return true;
     }
+    return false;
 }
