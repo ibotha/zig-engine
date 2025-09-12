@@ -199,18 +199,24 @@ const GraphicsContext = struct {
             //
             // #if defined(_GLFW_VULKAN_LIBRARY)
             //         _glfw.vk.handle = _glfwPlatformLoadModule(_GLFW_VULKAN_LIBRARY);
-            // #elif defined(_GLFW_WIN32)
+            // #elif defined(_GLFW_WIN32) // Windows
             //         _glfw.vk.handle = _glfwPlatformLoadModule("vulkan-1.dll");
-            // #elif defined(_GLFW_COCOA)
+            // #elif defined(_GLFW_COCOA) // MacOS
             //         _glfw.vk.handle = _glfwPlatformLoadModule("libvulkan.1.dylib");
             //         if (!_glfw.vk.handle)
-            //             _glfw.vk.handle = _glfwLoadLocalVulkanLoaderCocoa();
-            // #elif defined(__OpenBSD__) || defined(__NetBSD__)
+            //             _glfw.vk.handle = _glfwLoadLocalVulkanLoaderCocoa(); // Wut?
+            // #elif defined(__OpenBSD__) || defined(__NetBSD__) // Some linux
             //         _glfw.vk.handle = _glfwPlatformLoadModule("libvulkan.so");
-            // #else
+            // #else // other linux...
             //         _glfw.vk.handle = _glfwPlatformLoadModule("libvulkan.so.1");
             // #endif
-            .libvk = try std.DynLib.open("libvulkan.so"),
+            .libvk = blk: {
+                break :blk std.DynLib.open("libvulkan.so") catch {
+                    break :blk std.DynLib.open("libvulkan.so.1") catch {
+                        return error.CouldNotLoadVulkan;
+                    };
+                };
+            },
         };
         try vk_alloc.init();
         ret.load_fn = ret.libvk.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr").?;
