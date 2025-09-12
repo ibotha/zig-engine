@@ -56,6 +56,9 @@ const Window = struct {
     frame: *c.struct_libdecor_frame = undefined,
 };
 
+var resize_cooldown = core.Timer{};
+var last_resize_event: ?event.Event = null;
+
 fn frameConfigure(frame: ?*c.struct_libdecor_frame, config: ?*c.struct_libdecor_configuration, _: ?*anyopaque) callconv(.c) void {
     var width: c_int = undefined;
     var height: c_int = undefined;
@@ -87,6 +90,11 @@ fn frameConfigure(frame: ?*c.struct_libdecor_frame, config: ?*c.struct_libdecor_
         window.floating_width = @intCast(width);
         window.floating_height = @intCast(height);
     }
+    last_resize_event = .{ .resize = .{
+        .x = @intCast(width),
+        .y = @intCast(height),
+    } };
+    resize_cooldown.reset();
 }
 
 fn frameClose(_: ?*c.struct_libdecor_frame, _: ?*anyopaque) callconv(.c) void {
@@ -119,6 +127,7 @@ var context = WaylandContext{};
 var input = Input{};
 
 pub fn init(opts: common.PlatformOpts) !void {
+    resize_cooldown.reset();
     context.display = try wl.Display.connect(null);
     context.registry = try context.display.getRegistry();
     context.registry.setListener(?*anyopaque, eventListener, null);
@@ -162,6 +171,11 @@ pub fn deinit() void {
 }
 
 pub fn poll_events() !void {
+    resize_cooldown.update();
+    if (resize_cooldown.elapsed > 0.1 and last_resize_event != null) {
+        event.fire(last_resize_event.?, null);
+        last_resize_event = null;
+    }
     if (c.libdecor_dispatch(window.ldecor, 0) < 0) {
         // @panic("Wayland event dispatch didn't return SUCCESS");
     }
@@ -173,10 +187,6 @@ pub fn get_surface() *anyopaque {
 
 pub fn get_display() *anyopaque {
     return context.display;
-}
-
-pub fn content_size() struct { x: u16, y: u16 } {
-    return .{ .x = window.configured_width, .y = window.configured_height };
 }
 
 fn eventListener(registry: *wl.Registry, e: wl.Registry.Event, _: ?*anyopaque) void {
@@ -278,6 +288,7 @@ fn handleKeyboardEvent(kbd: *wl.Keyboard, ev: wl.Keyboard.Event, _: ?*anyopaque)
                         c.KEY_DOWN => break :btn_tag .down,
                         c.KEY_LEFT => break :btn_tag .left,
                         c.KEY_RIGHT => break :btn_tag .right,
+                        c.KEY_ESC => break :btn_tag .esc,
                         else => .unknown,
                     },
                     .pressed = e.state == .pressed,

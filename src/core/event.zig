@@ -60,6 +60,7 @@ pub const Key = enum(u8) {
 pub const EventType = enum(u3) {
     mouse_moved,
     mouse_scroll,
+    resize,
     mouse_button,
     key,
     closed,
@@ -68,6 +69,7 @@ pub const EventType = enum(u3) {
 pub const Event = union(EventType) {
     mouse_moved: zlm.Vec2,
     mouse_scroll: zlm.Vec2,
+    resize: zlm.Vec2,
     mouse_button: struct { button: MouseButton, pressed: bool },
     key: struct { key: Key, pressed: bool },
     closed: void,

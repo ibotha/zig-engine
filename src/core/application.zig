@@ -24,6 +24,14 @@ fn onKey(_: ?*anyopaque, ev: event.Event, _: ?*anyopaque) bool {
         .left => {
             app_state.clear_color.z = if (key.pressed) 1 else 0;
         },
+        .r => {
+            if (key.pressed)
+                memory.report();
+        },
+        .esc => {
+            if (key.pressed)
+                app_state.exec_state = .shutdown;
+        },
         else => {
             return false;
         },

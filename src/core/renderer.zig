@@ -3,8 +3,14 @@ const zlm = @import("zlm");
 const mu16 = zlm.as(u16);
 const mf32 = zlm.as(f32);
 const std = @import("std");
+const event = @import("event.zig");
 
 pub const RendererOpts = struct { name: []const u8, size_hint: mu16.Vec2 };
+
+fn onResize(_: ?*anyopaque, ev: event.Event, _: ?*anyopaque) bool {
+    backend.resize(ev.resize);
+    return true;
+}
 
 pub fn init(opts: RendererOpts) !void {
     try backend.init(.{
@@ -12,6 +18,8 @@ pub fn init(opts: RendererOpts) !void {
         .start_height = opts.size_hint.x,
         .start_width = opts.size_hint.y,
     });
+
+    try event.listen(.resize, null, onResize);
 }
 pub fn deinit() void {
     backend.deinit();

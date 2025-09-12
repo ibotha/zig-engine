@@ -5,6 +5,7 @@ const core = @import("core");
 
 const c = @import("c.zig");
 const vk_alloc = @import("vulkan_allocator.zig");
+const mu16 = core.math.as(u16);
 
 const callbacks = vk_alloc.callbacks;
 const Allocator = std.mem.Allocator;
@@ -33,13 +34,6 @@ pub fn deinit() void {
 }
 
 pub fn startFrame() !void {
-    const size = platform.content_size();
-    if (size.x != gc.render_size.width or size.y != gc.render_size.height) {
-        gc.refresh_swapchain = true;
-        gc.render_size.width = size.x;
-        gc.render_size.height = size.y;
-    }
-
     const im = gc.currentFrame();
     try im.waitForFence(gc.dev);
     try gc.dev.resetFences(1, @ptrCast(&im.frame_fence));
@@ -51,6 +45,12 @@ pub fn startFrame() !void {
         .flags = .{ .one_time_submit_bit = true },
     });
     try transitionImage(gc.dev, im.cmdbuf, im.image, .undefined, .general);
+}
+
+pub fn resize(size: mu16.Vec2) void {
+    gc.render_size.width = size.x;
+    gc.render_size.height = size.y;
+    gc.refresh_swapchain = true;
 }
 
 pub fn clear(color: [4]f32) void {
