@@ -24,4 +24,6 @@ A 2D engine written in zig using vulkan.
   - [ ] Text
   - [ ] Buttons
   - [ ] Sliders
+- [ ] Windows support
+- [ ] Mac Support
      
