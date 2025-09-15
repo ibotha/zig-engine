@@ -25,4 +25,3 @@ A 2D engine written in zig using vulkan.
   - [ ] Buttons
   - [ ] Sliders
      
-# LICENSE: MIT
